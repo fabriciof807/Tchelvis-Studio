@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability.json",
+  "identifier": "default",
+  "description": "Base permissions for the Game Dev Hub main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "fs:default"
+  ]
+}

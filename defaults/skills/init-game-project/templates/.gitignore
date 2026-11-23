@@ -1,0 +1,13 @@
+# Game Dev Hub ephemeral state
+.hub/hub.lock
+.hub/layout.json
+.hub/pi-session/
+.hub/captures/
+
+# Tchelvis loop runs & worktrees
+.loops/
+
+# Engine / build caches
+game/.godot/
+game/node_modules/
+game/dist/

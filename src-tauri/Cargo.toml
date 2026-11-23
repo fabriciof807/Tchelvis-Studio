@@ -1,0 +1,34 @@
+[package]
+name = "game-hub"
+version = "0.1.0"
+description = "Local-first Game Design & Agent Orchestration Studio"
+authors = ["Game Dev Hub"]
+edition = "2021"
+
+[lib]
+name = "game_hub_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+desktop = ["dep:tauri", "dep:tauri-plugin-fs", "dep:tauri-build"]
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }
+
+[dependencies]
+tauri = { version = "2", optional = true, features = ["protocol-asset"] }
+tauri-plugin-fs = { version = "2", optional = true }
+notify = "6"
+notify-debouncer-mini = "0.4"
+portable-pty = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

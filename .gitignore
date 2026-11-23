@@ -1,0 +1,11 @@
+node_modules/
+dist/
+src-tauri/target/
+.work/
+.hub/hub.lock
+.hub/layout.json
+.hub/pi-session/
+.hub/captures/
+.loops/
+*.log
+.DS_Store

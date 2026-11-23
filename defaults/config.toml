@@ -1,0 +1,30 @@
+# Game Dev Hub Global Configuration
+# Copied to ~/.config/game-hub/config.toml on first run if absent.
+
+[general]
+# External browser command used by "Open in External Browser" in Web Preview
+external_browser = "xdg-open"
+# Maximum size of .hub/captures/ before warning (200 MiB)
+capture_quota_bytes = 209715200
+
+[webkitgtk]
+# Set to true on Wayland/NVIDIA systems to avoid DMABUF renderer glitches
+disable_dmabuf_renderer = true
+
+[compositor]
+# "auto" | "hyprland" | "none"
+backend = "auto"
+# Default staging window size for Godot preview
+preview_width = 1280
+preview_height = 720
+
+[preview]
+# Port range for Vite dev server (falls back to ephemeral port if exhausted)
+vite_port_start = 4173
+vite_port_end = 4199
+healthcheck_timeout_ms = 10000
+
+[sidecar]
+# Optional explicit paths; defaults to searching $PATH
+dpi_backend_bin = "dpi-backend"
+tchelvis_bin = "tchelvis"
