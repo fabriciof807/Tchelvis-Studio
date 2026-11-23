@@ -74,11 +74,24 @@ build_and_install() {
     npm ci --no-audit --no-fund
     npm run build
 
-    info "Compilando binário Tauri (--features desktop --release)..."
-    cargo build --manifest-path src-tauri/Cargo.toml --release --features desktop
+    info "Compilando binário Tauri (--features desktop,custom-protocol --release)..."
+    cargo build --manifest-path src-tauri/Cargo.toml --release --features desktop,custom-protocol
 
-    mkdir -p "$BIN_DIR" "$DESKTOP_DIR"
+    mkdir -p "$BIN_DIR" "$DESKTOP_DIR" "${XDG_CONFIG_HOME:-$HOME/.config}/game-hub"
     install -Dm755 "src-tauri/target/release/game-hub" "$BIN_DIR/game-hub"
+
+    if [ -d "$INSTALL_DIR/defaults" ]; then
+        local cfg_dir="${XDG_CONFIG_HOME:-$HOME/.config}/game-hub"
+        (
+            cd "$INSTALL_DIR/defaults"
+            find . -type d -exec mkdir -p "$cfg_dir/{}" \;
+            find . -type f | while IFS= read -r f; do
+                if [ ! -e "$cfg_dir/$f" ]; then
+                    cp "$f" "$cfg_dir/$f"
+                fi
+            done
+        )
+    fi
 
     cat > "$DESKTOP_DIR/game-hub.desktop" <<EOF
 [Desktop Entry]
