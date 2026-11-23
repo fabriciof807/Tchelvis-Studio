@@ -248,3 +248,24 @@ pub struct PiStreamEvent {
     pub turn_id: String,
     pub payload: serde_json::Value,
 }
+
+/// Result of checking the local install repository against `origin`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct UpdateCheckResult {
+    pub repo_dir: String,
+    pub branch: String,
+    pub current_commit: String,
+    pub remote_commit: String,
+    pub commits_behind: u32,
+    pub update_available: bool,
+    pub changelog: Vec<String>,
+}
+
+/// Result of pulling and rebuilding from the remote repository.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct UpdateApplyResult {
+    pub updated: bool,
+    pub new_commit: String,
+    pub message: String,
+    pub output_log: String,
+}

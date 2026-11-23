@@ -1,6 +1,13 @@
-import React, { useRef, useState } from 'react';
+import React, { memo, useRef, useState } from 'react';
 import { ipc } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CloseIcon,
+  ImageIcon,
+  PaperclipIcon,
+} from '../components/Icons';
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -15,7 +22,7 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-export const ChatPanel: React.FC = () => {
+export const ChatPanel: React.FC = memo(() => {
   const chatMessages = useWorkspaceStore((s) => s.chatMessages);
   const subagentStatuses = useWorkspaceStore((s) => s.subagentStatuses);
   const compactionNotice = useWorkspaceStore((s) => s.compactionNotice);
@@ -149,7 +156,8 @@ export const ChatPanel: React.FC = () => {
               <div className="msg-attachments">
                 {msg.attachments.map((att, i) => (
                   <span key={`${att.image_path}-${i}`} className="attachment-chip-sent">
-                    📎 {att.image_path}
+                    <PaperclipIcon size={12} />
+                    <span>{att.image_path}</span>
                   </span>
                 ))}
               </div>
@@ -166,7 +174,10 @@ export const ChatPanel: React.FC = () => {
                         className="tool-call-toggle"
                         onClick={() => toggleTool(tc.id)}
                       >
-                        <span>{isOpen ? '▾' : '▸'} {tc.name}</span>
+                        <span className="inline-icon-text">
+                          {isOpen ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
+                          <span>{tc.name}</span>
+                        </span>
                         <span className={`tool-status status-${tc.status}`}>{tc.status}</span>
                       </button>
                       {isOpen && (
@@ -189,8 +200,9 @@ export const ChatPanel: React.FC = () => {
           <div className="oneshot-chips">
             {oneShotAttachments.map((att, idx) => (
               <span key={`${att.image_path}-${idx}`} className="oneshot-chip">
-                <span title={att.user_note ?? att.image_path}>
-                  🖼 {att.image_path.split('/').pop()}
+                <span className="inline-icon-text" title={att.user_note ?? att.image_path}>
+                  <ImageIcon size={12} />
+                  <span>{att.image_path.split('/').pop()}</span>
                 </span>
                 <button
                   type="button"
@@ -198,7 +210,7 @@ export const ChatPanel: React.FC = () => {
                   onClick={() => removeOneShotAttachment(idx)}
                   aria-label="Remover anexo"
                 >
-                  ×
+                  <CloseIcon size={11} />
                 </button>
               </span>
             ))}
@@ -239,4 +251,6 @@ export const ChatPanel: React.FC = () => {
       </form>
     </div>
   );
-};
+});
+
+ChatPanel.displayName = 'ChatPanel';

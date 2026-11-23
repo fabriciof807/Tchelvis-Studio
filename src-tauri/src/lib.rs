@@ -5,6 +5,7 @@ pub mod preview;
 pub mod pty;
 pub mod sidecar;
 pub mod types;
+pub mod updater;
 pub mod workspace;
 
 use compositor::{CompositorAdapter, HyprlandCompositorAdapter};
@@ -24,7 +25,8 @@ use std::time::Duration;
 use types::{
     AmbientEnvelope, CaptureResult, CaptureSaved, FileTreeNode, GlobalConfig, LensInfo,
     LoopRunState, MarkdownFilePayload, MergeCheckResult, MergeResult, PiTurnAck, PreviewStatus,
-    ProjectConfig, RecentWorkspace, WorkspaceInfo, WriteMarkdownResult,
+    ProjectConfig, RecentWorkspace, UpdateApplyResult, UpdateCheckResult, WorkspaceInfo,
+    WriteMarkdownResult,
 };
 
 /// Shared microkernel state used by both headless tests and Tauri desktop IPC.
@@ -430,10 +432,19 @@ pub fn cmd_git_cleanup_worktree(state: &AppState, run_id: String) -> Result<(), 
     git_ops::cleanup_worktree(&root, &run_id)
 }
 
+pub fn cmd_check_for_updates() -> Result<UpdateCheckResult, String> {
+    updater::check_for_updates()
+}
+
+pub fn cmd_apply_update() -> Result<UpdateApplyResult, String> {
+    updater::apply_update()
+}
+
 #[cfg(feature = "desktop")]
 mod desktop_ipc {
     use super::*;
     use tauri::{Emitter, Manager, State};
+    use tauri_plugin_dialog::DialogExt;
     use tauri_plugin_fs::FsExt;
 
     #[tauri::command]
@@ -513,7 +524,7 @@ mod desktop_ipc {
     ) -> Result<String, String> {
         cmd_pty_spawn_with_cb(&state, cols, rows, move |session_id, data| {
             let _ = app.emit(
-                "pty://data",
+                "pty://output",
                 serde_json::json!({ "session_id": session_id, "data": data }),
             );
         })
@@ -646,9 +657,37 @@ mod desktop_ipc {
         cmd_git_cleanup_worktree(&state, run_id)
     }
 
+    #[tauri::command]
+    pub async fn pick_workspace_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+        tokio::task::spawn_blocking(move || {
+            app.dialog()
+                .file()
+                .set_title("Selecionar Pasta do Projeto")
+                .blocking_pick_folder()
+                .map(|p| p.to_string())
+        })
+        .await
+        .map_err(|e| format!("Falha ao abrir seletor de pastas: {e}"))
+    }
+
+    #[tauri::command]
+    pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
+        tokio::task::spawn_blocking(cmd_check_for_updates)
+            .await
+            .map_err(|e| format!("Falha ao verificar atualizações: {e}"))?
+    }
+
+    #[tauri::command]
+    pub async fn apply_update() -> Result<UpdateApplyResult, String> {
+        tokio::task::spawn_blocking(cmd_apply_update)
+            .await
+            .map_err(|e| format!("Falha ao aplicar atualização: {e}"))?
+    }
+
     pub fn run_desktop(global_config: GlobalConfig) {
         tauri::Builder::default()
             .plugin(tauri_plugin_fs::init())
+            .plugin(tauri_plugin_dialog::init())
             .manage(AppState::new(global_config))
             .invoke_handler(tauri::generate_handler![
                 open_workspace,
@@ -679,6 +718,9 @@ mod desktop_ipc {
                 git_merge_worktree,
                 git_list_orphan_worktrees,
                 git_cleanup_worktree,
+                pick_workspace_directory,
+                check_for_updates,
+                apply_update,
             ])
             .run(tauri::generate_context!())
             .expect("error while running Game Dev Hub");

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
   DockviewReact,
   type DockviewApi,
@@ -12,15 +12,58 @@ import { PresetsBar } from './PresetsBar';
 import { ChatPanel } from '../panels/ChatPanel';
 import { TerminalPanel } from '../panels/TerminalPanel';
 import { PreviewLightbox } from '../panels/PreviewLightbox';
+import { SettingsModal } from '../components/SettingsModal';
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CloseIcon,
+  FileTextIcon,
+  FolderIcon,
+  LayersIcon,
+  MessageSquareIcon,
+  PlayIcon,
+  RefreshIcon,
+  RepeatIcon,
+  SettingsIcon,
+  TerminalIcon,
+} from '../components/Icons';
+
+const DRAWER_SIZES_KEY = 'game-hub:drawer-sizes';
+
+interface DrawerSizes {
+  left: number;
+  right: number;
+  bottom: number;
+}
+
+const DEFAULT_DRAWER_SIZES: DrawerSizes = { left: 240, right: 340, bottom: 220 };
+
+function loadDrawerSizes(): DrawerSizes {
+  try {
+    const raw = window.localStorage.getItem(DRAWER_SIZES_KEY);
+    if (!raw) return DEFAULT_DRAWER_SIZES;
+    const parsed = JSON.parse(raw) as Partial<DrawerSizes>;
+    return {
+      left: typeof parsed.left === 'number' ? clamp(parsed.left, 160, 520) : 240,
+      right: typeof parsed.right === 'number' ? clamp(parsed.right, 240, 680) : 340,
+      bottom: typeof parsed.bottom === 'number' ? clamp(parsed.bottom, 100, 600) : 220,
+    };
+  } catch {
+    return DEFAULT_DRAWER_SIZES;
+  }
+}
+
+function clamp(val: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, val));
+}
 
 const FileTreeItem: React.FC<{
   node: FileTreeNode;
   depth: number;
   onOpenFile: (relPath: string, name: string) => void;
-}> = ({ node, depth, onOpenFile }) => {
+}> = memo(({ node, depth, onOpenFile }) => {
   const [expanded, setExpanded] = useState(depth < 1);
-  const dirtyFiles = useWorkspaceStore((s) => s.dirtyFiles);
-  const isDirty = !node.is_dir && dirtyFiles.includes(node.rel_path);
+  const isDirty = useWorkspaceStore((s) => !node.is_dir && s.dirtyFiles.includes(node.rel_path));
 
   if (node.is_dir) {
     return (
@@ -31,7 +74,9 @@ const FileTreeItem: React.FC<{
           style={{ paddingLeft: `${8 + depth * 12}px` }}
           onClick={() => setExpanded((e) => !e)}
         >
-          <span className="tree-caret">{expanded ? '▾' : '▸'}</span>
+          <span className="tree-caret">
+            {expanded ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
+          </span>
           <span className="tree-label">{node.name}</span>
         </button>
         {expanded &&
@@ -51,15 +96,18 @@ const FileTreeItem: React.FC<{
     <button
       type="button"
       className="tree-row tree-file"
-      style={{ paddingLeft: `${20 + depth * 12}px` }}
+      style={{ paddingLeft: `${18 + depth * 12}px` }}
       onClick={() => onOpenFile(node.rel_path, node.name)}
       title={node.rel_path}
     >
+      <FileTextIcon size={13} className="tree-file-icon" />
       <span className="tree-label">{node.name}</span>
       {isDirty && <span className="tree-dirty-dot" title="Não salvo" />}
     </button>
   );
-};
+});
+
+FileTreeItem.displayName = 'FileTreeItem';
 
 export const DockManager: React.FC = () => {
   const fileTree = useWorkspaceStore((s) => s.fileTree);
@@ -83,8 +131,86 @@ export const DockManager: React.FC = () => {
   const setPreviewLightboxOpen = useWorkspaceStore((s) => s.setPreviewLightboxOpen);
   const refreshFileTree = useWorkspaceStore((s) => s.refreshFileTree);
 
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const hubRootRef = useRef<HTMLDivElement | null>(null);
+  const sizesRef = useRef<DrawerSizes>(loadDrawerSizes());
   const dockApiRef = useRef<DockviewApi | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const root = hubRootRef.current;
+    if (!root) return;
+    root.style.setProperty('--left-drawer-width', `${sizesRef.current.left}px`);
+    root.style.setProperty('--right-drawer-width', `${sizesRef.current.right}px`);
+    root.style.setProperty('--bottom-drawer-height', `${sizesRef.current.bottom}px`);
+  }, []);
+
+  const startResize = useCallback(
+    (which: 'left' | 'right' | 'bottom', e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const target = e.currentTarget;
+      target.setPointerCapture(e.pointerId);
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const initial = { ...sizesRef.current };
+
+      document.body.classList.add('is-resizing');
+      document.body.dataset.resizeAxis = which === 'bottom' ? 'y' : 'x';
+
+      let rafId: number | null = null;
+      let latestSize = initial[which];
+
+      const applySize = (nextSize: number) => {
+        latestSize = nextSize;
+        sizesRef.current[which] = nextSize;
+        if (rafId !== null) return;
+        rafId = window.requestAnimationFrame(() => {
+          rafId = null;
+          const root = hubRootRef.current;
+          if (!root) return;
+          if (which === 'left') {
+            root.style.setProperty('--left-drawer-width', `${latestSize}px`);
+          } else if (which === 'right') {
+            root.style.setProperty('--right-drawer-width', `${latestSize}px`);
+          } else {
+            root.style.setProperty('--bottom-drawer-height', `${latestSize}px`);
+          }
+        });
+      };
+
+      const onMove = (ev: PointerEvent) => {
+        if (which === 'left') {
+          applySize(clamp(initial.left + (ev.clientX - startX), 160, 520));
+        } else if (which === 'right') {
+          applySize(clamp(initial.right - (ev.clientX - startX), 240, 680));
+        } else {
+          applySize(clamp(initial.bottom - (ev.clientY - startY), 100, 600));
+        }
+      };
+
+      const onUp = () => {
+        if (rafId !== null) {
+          window.cancelAnimationFrame(rafId);
+        }
+        document.body.classList.remove('is-resizing');
+        delete document.body.dataset.resizeAxis;
+        target.removeEventListener('pointermove', onMove);
+        target.removeEventListener('pointerup', onUp);
+        target.removeEventListener('pointercancel', onUp);
+        try {
+          window.localStorage.setItem(DRAWER_SIZES_KEY, JSON.stringify(sizesRef.current));
+        } catch {
+          // ignore storage errors
+        }
+      };
+
+      target.addEventListener('pointermove', onMove);
+      target.addEventListener('pointerup', onUp);
+      target.addEventListener('pointercancel', onUp);
+    },
+    []
+  );
 
   const openDefaultPanels = useCallback((api: DockviewApi) => {
     const firstMd = fileTree
@@ -181,13 +307,12 @@ export const DockManager: React.FC = () => {
     clearPendingPanelRequest();
   }, [pendingPanelRequest, clearPendingPanelRequest]);
 
-  const handleOpenFile = (relPath: string, name: string) => {
-    if (relPath.toLowerCase().endsWith('.md')) {
+  const handleOpenFile = useCallback(
+    (relPath: string, name: string) => {
       requestOpenPanel('markdown', name, { relPath });
-    } else {
-      requestOpenPanel('markdown', name, { relPath });
-    }
-  };
+    },
+    [requestOpenPanel]
+  );
 
   const handleApplyPresetLayout = (layoutJson: string) => {
     if (!dockApiRef.current) return;
@@ -213,14 +338,15 @@ export const DockManager: React.FC = () => {
   };
 
   return (
-    <div className="hub-root">
+    <div ref={hubRootRef} className="hub-root">
       <PresetsBar
         onApplyPresetLayout={handleApplyPresetLayout}
         onResetDefaultLayout={handleResetDefaultLayout}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <div className="hub-workspace-body">
-        {/* ~40px Activity Bar */}
+        {/* ~42px Activity Bar */}
         <aside className="activity-bar" aria-label="Barra de Atividades">
           <button
             type="button"
@@ -228,7 +354,7 @@ export const DockManager: React.FC = () => {
             onClick={() => handleActivityClick('explorer')}
             title="Explorador de Arquivos (Ctrl+B)"
           >
-            📁
+            <FolderIcon size={17} />
           </button>
           <button
             type="button"
@@ -236,7 +362,7 @@ export const DockManager: React.FC = () => {
             onClick={() => handleActivityClick('loops')}
             title="Loops (Tchelvis-Supervisor)"
           >
-            🔄
+            <RepeatIcon size={17} />
           </button>
           <button
             type="button"
@@ -244,7 +370,7 @@ export const DockManager: React.FC = () => {
             onClick={() => handleActivityClick('lenses')}
             title="Lentes Customizadas (.hub/views/)"
           >
-            🔭
+            <LayersIcon size={17} />
           </button>
 
           <div className="activity-spacer" />
@@ -259,7 +385,7 @@ export const DockManager: React.FC = () => {
             }
             title="Preview Flutuante (F5)"
           >
-            ▶
+            <PlayIcon size={16} />
           </button>
           <button
             type="button"
@@ -267,7 +393,7 @@ export const DockManager: React.FC = () => {
             onClick={toggleBottom}
             title="Terminal Inferior (Ctrl+J)"
           >
-            ⌘
+            <TerminalIcon size={16} />
           </button>
           <button
             type="button"
@@ -275,102 +401,118 @@ export const DockManager: React.FC = () => {
             onClick={toggleRight}
             title="Chat Pi Durable (Ctrl+L)"
           >
-            💬
+            <MessageSquareIcon size={16} />
+          </button>
+          <button
+            type="button"
+            className="activity-btn"
+            onClick={() => setSettingsOpen(true)}
+            title="Configurações e Atualizações"
+          >
+            <SettingsIcon size={16} />
           </button>
         </aside>
 
-        {/* Left Collapsible Drawer */}
+        {/* Left Collapsible Drawer (kept mounted for instant Zen Mode) */}
+        <aside className={`left-drawer ${leftCollapsed ? 'drawer-collapsed' : ''}`}>
+          {activeLeftSection === 'explorer' && (
+            <div className="drawer-section">
+              <div className="drawer-header">
+                <span>EXPLORADOR</span>
+                <button
+                  type="button"
+                  className="btn-icon-xs"
+                  onClick={() => void refreshFileTree()}
+                  title="Atualizar árvore"
+                >
+                  <RefreshIcon size={13} />
+                </button>
+              </div>
+              <div className="drawer-scroll">
+                {fileTree.length === 0 ? (
+                  <div className="drawer-empty">Workspace vazio</div>
+                ) : (
+                  fileTree.map((node) => (
+                    <FileTreeItem
+                      key={node.rel_path}
+                      node={node}
+                      depth={0}
+                      onOpenFile={handleOpenFile}
+                    />
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeLeftSection === 'loops' && (
+            <div className="drawer-section">
+              <div className="drawer-header">
+                <span>LOOPS (TCHELVIS)</span>
+              </div>
+              <div className="drawer-scroll">
+                {loopRuns.length === 0 ? (
+                  <div className="drawer-empty">Nenhum loop executado.</div>
+                ) : (
+                  loopRuns.map((run) => (
+                    <button
+                      key={run.run_id}
+                      type="button"
+                      className="drawer-list-item"
+                      onClick={() =>
+                        requestOpenPanel('loops', 'Loops', { runId: run.run_id })
+                      }
+                    >
+                      <div className="drawer-item-title">{run.title}</div>
+                      <span className={`loop-status-pill status-${run.status}`}>
+                        {run.status}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeLeftSection === 'lenses' && (
+            <div className="drawer-section">
+              <div className="drawer-header">
+                <span>LENTES (.hub/views/)</span>
+              </div>
+              <div className="drawer-scroll">
+                {lenses.length === 0 ? (
+                  <div className="drawer-empty">Nenhuma lente publicada.</div>
+                ) : (
+                  lenses.map((lens) => (
+                    <button
+                      key={lens.lens_id}
+                      type="button"
+                      className="drawer-list-item"
+                      onClick={() =>
+                        requestOpenPanel('lens', lens.title, {
+                          lensId: lens.lens_id,
+                          title: lens.title,
+                        })
+                      }
+                    >
+                      <div className="drawer-item-title">{lens.title}</div>
+                      <span className="muted-text">{lens.lens_id}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+        </aside>
+
         {!leftCollapsed && (
-          <aside className="left-drawer">
-            {activeLeftSection === 'explorer' && (
-              <div className="drawer-section">
-                <div className="drawer-header">
-                  <span>EXPLORADOR</span>
-                  <button
-                    type="button"
-                    className="btn-icon-xs"
-                    onClick={() => void refreshFileTree()}
-                    title="Atualizar árvore"
-                  >
-                    ↻
-                  </button>
-                </div>
-                <div className="drawer-scroll">
-                  {fileTree.length === 0 ? (
-                    <div className="drawer-empty">Workspace vazio</div>
-                  ) : (
-                    fileTree.map((node) => (
-                      <FileTreeItem
-                        key={node.rel_path}
-                        node={node}
-                        depth={0}
-                        onOpenFile={handleOpenFile}
-                      />
-                    ))
-                  )}
-                </div>
-              </div>
-            )}
-
-            {activeLeftSection === 'loops' && (
-              <div className="drawer-section">
-                <div className="drawer-header">
-                  <span>LOOPS (TCHELVIS)</span>
-                </div>
-                <div className="drawer-scroll">
-                  {loopRuns.length === 0 ? (
-                    <div className="drawer-empty">Nenhum loop executado.</div>
-                  ) : (
-                    loopRuns.map((run) => (
-                      <button
-                        key={run.run_id}
-                        type="button"
-                        className="drawer-list-item"
-                        onClick={() =>
-                          requestOpenPanel('loops', 'Loops', { runId: run.run_id })
-                        }
-                      >
-                        <div className="drawer-item-title">{run.title}</div>
-                        <span className={`loop-status-pill status-${run.status}`}>
-                          {run.status}
-                        </span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              </div>
-            )}
-
-            {activeLeftSection === 'lenses' && (
-              <div className="drawer-section">
-                <div className="drawer-header">
-                  <span>LENTES (.hub/views/)</span>
-                </div>
-                <div className="drawer-scroll">
-                  {lenses.length === 0 ? (
-                    <div className="drawer-empty">Nenhuma lente publicada.</div>
-                  ) : (
-                    lenses.map((lens) => (
-                      <button
-                        key={lens.lens_id}
-                        type="button"
-                        className="drawer-list-item"
-                        onClick={() =>
-                          requestOpenPanel('lens', lens.title, {
-                            lensId: lens.lens_id,
-                            title: lens.title,
-                          })
-                        }
-                      >
-                        <div className="drawer-item-title">{lens.title}</div>
-                        <span className="muted-text">{lens.lens_id}</span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              </div>
-            )}
-          </aside>
+          <div
+            className="resize-handle-x"
+            onPointerDown={(e) => startResize('left', e)}
+            role="separator"
+            aria-orientation="vertical"
+            title="Arrastar para redimensionar painel esquerdo"
+          />
         )}
 
         {/* Center Dockview Grid + Bottom Terminal Drawer */}
@@ -384,34 +526,51 @@ export const DockManager: React.FC = () => {
           </div>
 
           {!bottomCollapsed && (
-            <div className="bottom-drawer">
-              <div className="drawer-header">
-                <span>TERMINAL</span>
-                <button
-                  type="button"
-                  className="btn-icon-xs"
-                  onClick={toggleBottom}
-                  title="Recolher Terminal (Ctrl+J)"
-                >
-                  ✕
-                </button>
-              </div>
-              <div className="bottom-drawer-body">
-                <TerminalPanel />
-              </div>
-            </div>
+            <div
+              className="resize-handle-y"
+              onPointerDown={(e) => startResize('bottom', e)}
+              role="separator"
+              aria-orientation="horizontal"
+              title="Arrastar para redimensionar terminal"
+            />
           )}
+
+          <div className={`bottom-drawer ${bottomCollapsed ? 'drawer-collapsed' : ''}`}>
+            <div className="drawer-header">
+              <span>TERMINAL</span>
+              <button
+                type="button"
+                className="btn-icon-xs"
+                onClick={toggleBottom}
+                title="Recolher Terminal (Ctrl+J)"
+              >
+                <CloseIcon size={13} />
+              </button>
+            </div>
+            <div className="bottom-drawer-body">
+              <TerminalPanel visible={!bottomCollapsed} />
+            </div>
+          </div>
         </div>
 
-        {/* Right Collapsible Chat Drawer */}
         {!rightCollapsed && (
-          <aside className="right-drawer">
-            <ChatPanel />
-          </aside>
+          <div
+            className="resize-handle-x"
+            onPointerDown={(e) => startResize('right', e)}
+            role="separator"
+            aria-orientation="vertical"
+            title="Arrastar para redimensionar chat"
+          />
         )}
+
+        {/* Right Collapsible Chat Drawer (kept mounted for instant Zen Mode) */}
+        <aside className={`right-drawer ${rightCollapsed ? 'drawer-collapsed' : ''}`}>
+          <ChatPanel />
+        </aside>
       </div>
 
       <PreviewLightbox />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 };

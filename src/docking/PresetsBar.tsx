@@ -1,15 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import { ipc } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
+import { MaximizeIcon, MinimizeIcon, PlayIcon, SettingsIcon } from '../components/Icons';
 
 interface PresetsBarProps {
   onApplyPresetLayout: (layoutJson: string) => void;
   onResetDefaultLayout: () => void;
+  onOpenSettings: () => void;
 }
 
 export const PresetsBar: React.FC<PresetsBarProps> = ({
   onApplyPresetLayout,
   onResetDefaultLayout,
+  onOpenSettings,
 }) => {
   const workspace = useWorkspaceStore((s) => s.workspace);
   const zenMode = useWorkspaceStore((s) => s.zenMode);
@@ -79,20 +82,32 @@ export const PresetsBar: React.FC<PresetsBarProps> = ({
 
         <button
           type="button"
-          className={zenMode ? 'btn-primary-sm' : 'btn-ghost-sm'}
+          className={`${zenMode ? 'btn-primary-sm' : 'btn-ghost-sm'} inline-icon-btn`}
           onClick={toggleZenMode}
           title="Alternar Zen Mode"
         >
-          {zenMode ? 'Sair do Zen' : 'Zen Mode'}
+          {zenMode ? <MinimizeIcon size={13} /> : <MaximizeIcon size={13} />}
+          <span>{zenMode ? 'Sair do Zen' : 'Zen Mode'}</span>
         </button>
 
         <button
           type="button"
-          className={previewStatus?.running ? 'btn-primary-sm' : 'btn-ghost-sm'}
+          className={`${previewStatus?.running ? 'btn-primary-sm' : 'btn-ghost-sm'} inline-icon-btn`}
           onClick={handlePreviewClick}
           title="Preview Flutuante (F5)"
         >
-          {previewStatus?.running ? 'Preview Ativo (F5)' : 'Preview (F5)'}
+          <PlayIcon size={13} />
+          <span>{previewStatus?.running ? 'Preview Ativo (F5)' : 'Preview (F5)'}</span>
+        </button>
+
+        <button
+          type="button"
+          className="btn-ghost-sm inline-icon-btn"
+          onClick={onOpenSettings}
+          title="Configurações"
+        >
+          <SettingsIcon size={13} />
+          <span>Configurações</span>
         </button>
 
         <button type="button" className="btn-ghost-sm" onClick={closeWorkspace}>

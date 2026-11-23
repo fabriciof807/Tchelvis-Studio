@@ -11,7 +11,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = []
-desktop = ["dep:tauri", "dep:tauri-plugin-fs", "dep:tauri-build"]
+desktop = ["dep:tauri", "dep:tauri-plugin-fs", "dep:tauri-plugin-dialog", "dep:tauri-build"]
 custom-protocol = ["desktop", "tauri/custom-protocol"]
 
 [build-dependencies]
@@ -20,6 +20,7 @@ tauri-build = { version = "2", optional = true }
 [dependencies]
 tauri = { version = "2", optional = true, features = ["protocol-asset"] }
 tauri-plugin-fs = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
 notify = "6"
 notify-debouncer-mini = "0.4"
 portable-pty = "0.8"

@@ -118,6 +118,23 @@ export interface SaveCaptureResult {
   quota_exceeded: boolean;
 }
 
+export interface UpdateCheckResult {
+  repo_dir: string;
+  branch: string;
+  current_commit: string;
+  remote_commit: string;
+  commits_behind: number;
+  update_available: boolean;
+  changelog: string[];
+}
+
+export interface UpdateApplyResult {
+  updated: boolean;
+  new_commit: string;
+  message: string;
+  output_log: string;
+}
+
 export interface LensInfo {
   lens_id: string;
   title: string;
@@ -666,5 +683,39 @@ export const ipc = {
       return invoke<void>('git_cleanup_worktree', { runId });
     }
     void runId;
+  },
+
+  async pickWorkspaceDirectory(): Promise<string | null> {
+    if (isTauriEnv()) {
+      return invoke<string | null>('pick_workspace_directory');
+    }
+    return '/home/ubuntu/projetos/forja-cinza';
+  },
+
+  async checkForUpdates(): Promise<UpdateCheckResult> {
+    if (isTauriEnv()) {
+      return invoke<UpdateCheckResult>('check_for_updates');
+    }
+    return {
+      repo_dir: '~/.local/share/game-hub',
+      branch: 'master',
+      current_commit: 'mock000',
+      remote_commit: 'mock000',
+      commits_behind: 0,
+      update_available: false,
+      changelog: [],
+    };
+  },
+
+  async applyUpdate(): Promise<UpdateApplyResult> {
+    if (isTauriEnv()) {
+      return invoke<UpdateApplyResult>('apply_update');
+    }
+    return {
+      updated: false,
+      new_commit: 'mock000',
+      message: 'Modo navegador (mock): atualização via GitHub disponível apenas no app desktop.',
+      output_log: '',
+    };
   },
 };

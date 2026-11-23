@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { listenEvent, type FsChangedPayload, type PiEventPayload } from './types/ipc';
+import { ipc, listenEvent, type FsChangedPayload, type PiEventPayload } from './types/ipc';
 import { useWorkspaceStore } from './store/workspaceStore';
 import { DockManager } from './docking/DockManager';
+import { SettingsModal } from './components/SettingsModal';
+import { FolderIcon, FolderSearchIcon, SettingsIcon } from './components/Icons';
 
 export const App: React.FC = () => {
   const workspace = useWorkspaceStore((s) => s.workspace);
@@ -19,9 +21,10 @@ export const App: React.FC = () => {
   const refreshLenses = useWorkspaceStore((s) => s.refreshLenses);
   const requestOpenPanel = useWorkspaceStore((s) => s.requestOpenPanel);
 
-  const [manualPath, setManualPath] = useState('/home/ubuntu/projetos/forja-cinza');
+  const [manualPath, setManualPath] = useState('');
   const [openError, setOpenError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     void loadRecentWorkspaces();
@@ -130,37 +133,77 @@ export const App: React.FC = () => {
     }
   };
 
+  const handlePickFolder = async () => {
+    setOpenError(null);
+    try {
+      const selected = await ipc.pickWorkspaceDirectory();
+      if (selected) {
+        setManualPath(selected);
+        await handleOpenPath(selected);
+      }
+    } catch (err) {
+      setOpenError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   if (!workspace) {
     return (
       <div className="welcome-screen">
         <div className="welcome-card">
           <div className="welcome-header">
-            <span className="brand-mark">GAME DEV HUB</span>
+            <div className="welcome-top-row">
+              <span className="brand-mark">GAME DEV HUB</span>
+              <button
+                type="button"
+                className="btn-ghost-sm inline-icon-btn"
+                onClick={() => setSettingsOpen(true)}
+                title="Configurações e Atualizações"
+              >
+                <SettingsIcon size={14} />
+                <span>Configurações</span>
+              </button>
+            </div>
             <h1>Estúdio Local-First de Game Design &amp; Orquestração</h1>
             <p className="muted-text">
-              Selecione um projeto recente ou informe o caminho de um diretório para abrir ou
-              inicializar um workspace.
+              Selecione uma pasta pelo navegador do sistema, escolha um projeto recente ou informe o
+              caminho manualmente.
             </p>
           </div>
 
-          <form
-            className="welcome-open-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void handleOpenPath(manualPath);
-            }}
-          >
-            <input
-              type="text"
-              className="welcome-input"
-              value={manualPath}
-              onChange={(e) => setManualPath(e.target.value)}
-              placeholder="/caminho/para/meu-jogo"
-            />
-            <button type="submit" className="btn-primary-md" disabled={opening}>
-              {opening ? 'Abrindo...' : 'Abrir / Novo Diretório'}
+          <div className="welcome-picker-row">
+            <button
+              type="button"
+              className="btn-primary-md inline-icon-btn"
+              onClick={() => void handlePickFolder()}
+              disabled={opening}
+            >
+              <FolderSearchIcon size={16} />
+              <span>{opening ? 'Abrindo...' : 'Escolher Pasta...'}</span>
             </button>
-          </form>
+
+            <form
+              className="welcome-open-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleOpenPath(manualPath);
+              }}
+            >
+              <input
+                type="text"
+                className="welcome-input"
+                value={manualPath}
+                onChange={(e) => setManualPath(e.target.value)}
+                placeholder="/caminho/para/meu-jogo"
+              />
+              <button
+                type="submit"
+                className="btn-ghost-sm"
+                disabled={opening || !manualPath.trim()}
+              >
+                Abrir
+              </button>
+            </form>
+          </div>
 
           {openError && <div className="banner-error">{openError}</div>}
 
@@ -177,9 +220,12 @@ export const App: React.FC = () => {
                     className="recent-item"
                     onClick={() => void handleOpenPath(item.path)}
                   >
-                    <div>
-                      <div className="recent-name">{item.name}</div>
-                      <div className="recent-path">{item.path}</div>
+                    <div className="recent-item-left">
+                      <FolderIcon size={16} className="recent-folder-icon" />
+                      <div>
+                        <div className="recent-name">{item.name}</div>
+                        <div className="recent-path">{item.path}</div>
+                      </div>
                     </div>
                     <span className="recent-date">
                       {new Date(item.last_opened).toLocaleDateString('pt-BR')}
@@ -190,6 +236,7 @@ export const App: React.FC = () => {
             )}
           </div>
         </div>
+        <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       </div>
     );
   }
