@@ -26,10 +26,10 @@ const editorTheme = EditorView.theme(
   {
     '&': {
       height: '100%',
-      backgroundColor: '#11141d',
-      color: '#e2e8f0',
+      backgroundColor: 'var(--hub-bg)',
+      color: 'var(--hub-text)',
       fontSize: '14.5px',
-      fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      fontFamily: 'var(--hub-font-sans)',
     },
     '.cm-scroller': {
       overflow: 'auto',
@@ -39,23 +39,23 @@ const editorTheme = EditorView.theme(
       margin: '0 auto',
       padding: '24px 28px 64px',
       lineHeight: '1.7',
-      caretColor: '#60a5fa',
+      caretColor: 'var(--hub-accent)',
     },
     '.cm-line': {
       padding: '1px 0',
     },
     '.cm-activeLine': {
-      backgroundColor: 'rgba(59, 130, 246, 0.06)',
+      backgroundColor: 'rgba(148, 163, 184, 0.06)',
       borderRadius: '4px',
     },
     '.cm-cursor': {
-      borderLeftColor: '#60a5fa',
+      borderLeftColor: 'var(--hub-accent)',
       borderLeftWidth: '2px',
     },
     '.cm-tooltip.cm-tooltip-autocomplete': {
-      backgroundColor: '#1c202b',
-      border: '1px solid #334155',
-      color: '#e2e8f0',
+      backgroundColor: 'var(--hub-surface-2)',
+      border: '1px solid var(--hub-border)',
+      color: 'var(--hub-text)',
     },
   },
   { dark: true }

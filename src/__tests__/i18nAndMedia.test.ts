@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { detectSystemLocale, normalizeLocale, translate } from '../i18n';
 import { getFileExtension, getMediaKind, getMimeTypeForExt } from '../panels/mediaUtils';
+import { isThemeId, THEME_OPTIONS } from '../themes';
 
 describe('i18n locale detection and translation', () => {
   afterEach(() => {
@@ -44,5 +45,17 @@ describe('mediaUtils file detection', () => {
     expect(getMediaKind('gdd/01-visao-geral.md')).toBeNull();
     expect(getMimeTypeForExt('glb')).toBe('model/gltf-binary');
     expect(getMimeTypeForExt('svg')).toBe('image/svg+xml');
+  });
+});
+
+describe('themes', () => {
+  it('provides all 4 standard themes', () => {
+    const ids = THEME_OPTIONS.map((t) => t.id);
+    expect(ids).toEqual(['tokyo-night', 'gruvbox', 'kanagawa', 'github-dark']);
+    expect(isThemeId('tokyo-night')).toBe(true);
+    expect(isThemeId('gruvbox')).toBe(true);
+    expect(isThemeId('kanagawa')).toBe(true);
+    expect(isThemeId('github-dark')).toBe(true);
+    expect(isThemeId('unknown')).toBe(false);
   });
 });

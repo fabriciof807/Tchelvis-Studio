@@ -697,6 +697,26 @@ mod desktop_ipc {
             .map_err(|e| format!("Falha ao aplicar atualização: {e}"))?
     }
 
+    #[tauri::command]
+    pub fn restart_app(app: tauri::AppHandle, state: State<'_, AppState>) {
+        state.pty_manager.kill_all();
+        if let Ok(mut pm) = state.preview_manager.lock() {
+            pm.stop();
+        }
+        if let Ok(mut pi) = state.pi_adapter.lock() {
+            pi.shutdown();
+        }
+        if let Ok(mut w) = state.watcher.lock() {
+            *w = None;
+        }
+        if let Ok(guard) = state.workspace_root.lock() {
+            if let Some(root) = guard.as_ref() {
+                workspace::release_workspace_lock(root);
+            }
+        }
+        app.restart();
+    }
+
     pub fn run_desktop(global_config: GlobalConfig) {
         tauri::Builder::default()
             .plugin(tauri_plugin_fs::init())
@@ -735,6 +755,7 @@ mod desktop_ipc {
                 pick_workspace_directory,
                 check_for_updates,
                 apply_update,
+                restart_app,
             ])
             .run(tauri::generate_context!())
             .expect("error while running Game Dev Hub");

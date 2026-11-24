@@ -8,12 +8,14 @@ import {
 import { useWorkspaceStore } from '../store/workspaceStore';
 import { LOCALE_OPTIONS, type Locale } from '../i18n';
 import { useI18n } from '../i18n/useI18n';
+import { THEME_OPTIONS } from '../themes';
 import {
   AlertCircleIcon,
   CheckCircleIcon,
   CloseIcon,
   DownloadIcon,
   GlobeIcon,
+  PaletteIcon,
   RefreshIcon,
   SettingsIcon,
 } from './Icons';
@@ -29,9 +31,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   const decrementModalCount = useWorkspaceStore((s) => s.decrementModalCount);
   const updateChannel = useWorkspaceStore((s) => s.updateChannel);
   const setUpdateChannel = useWorkspaceStore((s) => s.setUpdateChannel);
+  const theme = useWorkspaceStore((s) => s.theme);
+  const setTheme = useWorkspaceStore((s) => s.setTheme);
 
   const [checking, setChecking] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [confirmingRestart, setConfirmingRestart] = useState(false);
   const [checkResult, setCheckResult] = useState<UpdateCheckResult | null>(null);
   const [applyResult, setApplyResult] = useState<UpdateApplyResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,6 +62,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
     setChecking(true);
     setError(null);
     setApplyResult(null);
+    setConfirmingRestart(false);
     try {
       const res = await ipc.checkForUpdates(channel);
       setCheckResult(res);
@@ -71,6 +77,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
     setUpdateChannel(channel);
     setCheckResult(null);
     setApplyResult(null);
+    setConfirmingRestart(false);
     setError(null);
     void runCheckForChannel(channel);
   };
@@ -80,6 +87,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   const handleApplyUpdate = async () => {
     setUpdating(true);
     setError(null);
+    setConfirmingRestart(false);
     try {
       const res = await ipc.applyUpdate(updateChannel);
       setApplyResult(res);
@@ -91,6 +99,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setUpdating(false);
+    }
+  };
+
+  const handleConfirmRestart = async () => {
+    try {
+      await ipc.restartApp();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setConfirmingRestart(false);
     }
   };
 
@@ -107,6 +124,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
           <div className="lightbox-title-group">
             <SettingsIcon size={16} />
             <span className="lightbox-title">{t('settings.title')}</span>
+            <span className="sandbox-badge">v0.4.0</span>
           </div>
           <button
             type="button"
@@ -120,6 +138,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
         </div>
 
         <div className="settings-body">
+          {/* Theme Section */}
+          <section className="settings-section">
+            <div>
+              <h3 className="inline-icon-text">
+                <PaletteIcon size={15} />
+                <span>{t('settings.themeTitle')}</span>
+              </h3>
+              <p className="muted-text">{t('settings.themeDesc')}</p>
+            </div>
+            <div className="theme-grid">
+              {THEME_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  className={`theme-card ${theme === opt.id ? 'active' : ''}`}
+                  onClick={() => setTheme(opt.id)}
+                >
+                  <span className="theme-swatches" aria-hidden="true">
+                    {opt.swatches.map((hex, i) => (
+                      <span key={i} className="theme-swatch" style={{ backgroundColor: hex }} />
+                    ))}
+                  </span>
+                  <span className="theme-name">{opt.name}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+
           {/* Language Section */}
           <section className="settings-section">
             <div className="settings-lang-row">
@@ -274,10 +320,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
 
             {applyResult && (
               <div className="update-apply-box">
-                <div className="inline-icon-text">
-                  <CheckCircleIcon size={14} />
-                  <span>{applyResult.message}</span>
+                <div className="update-apply-header">
+                  <div className="inline-icon-text">
+                    <CheckCircleIcon size={14} />
+                    <span>{applyResult.message}</span>
+                  </div>
+                  {applyResult.updated && !confirmingRestart && (
+                    <button
+                      type="button"
+                      className="btn-primary-sm inline-icon-btn"
+                      onClick={() => setConfirmingRestart(true)}
+                    >
+                      <RefreshIcon size={13} />
+                      <span>{t('settings.restartNow')}</span>
+                    </button>
+                  )}
                 </div>
+
+                {applyResult.updated && confirmingRestart && (
+                  <div className="restart-confirm-box">
+                    <span>{t('settings.restartConfirmPrompt')}</span>
+                    <div className="banner-actions">
+                      <button
+                        type="button"
+                        className="btn-primary-sm"
+                        onClick={() => void handleConfirmRestart()}
+                      >
+                        {t('settings.restartConfirmBtn')}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ghost-sm"
+                        onClick={() => setConfirmingRestart(false)}
+                      >
+                        {t('settings.restartCancelBtn')}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {applyResult.changelog.length > 0 && (
                   <div className="update-applied-changelog">
                     <strong>{t('settings.appliedChanges')}</strong>

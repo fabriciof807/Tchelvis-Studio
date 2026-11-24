@@ -1,23 +1,84 @@
-:root {
+:root,
+:root[data-theme='tokyo-night'] {
   color-scheme: dark;
-  --hub-bg: #0c0f17;
-  --hub-bg-elevated: #10141f;
-  --hub-surface: #141923;
-  --hub-surface-2: #1b2230;
-  --hub-surface-3: #232c3d;
-  --hub-border: #262f42;
-  --hub-border-subtle: rgba(148, 163, 184, 0.12);
-  --hub-text: #e2e8f0;
-  --hub-text-bright: #f8fafc;
-  --hub-muted: #94a3b8;
-  --hub-accent: #3b82f6;
-  --hub-accent-hover: #2563eb;
-  --hub-accent-glow: rgba(59, 130, 246, 0.28);
-  --hub-warn: #f59e0b;
-  --hub-danger: #ef4444;
-  --hub-success: #22c55e;
+  --hub-bg: #1a1b26;
+  --hub-bg-elevated: #16161e;
+  --hub-surface: #16161e;
+  --hub-surface-2: #24283b;
+  --hub-surface-3: #292e42;
+  --hub-border: #2f3549;
+  --hub-border-subtle: rgba(192, 202, 245, 0.1);
+  --hub-text: #c0caf5;
+  --hub-text-bright: #e0e8ff;
+  --hub-muted: #787c99;
+  --hub-accent: #7aa2f7;
+  --hub-accent-hover: #5d87e8;
+  --hub-accent-glow: rgba(122, 162, 247, 0.25);
+  --hub-warn: #e0af68;
+  --hub-danger: #f7768e;
+  --hub-success: #9ece6a;
   --hub-font-sans: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --hub-font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+:root[data-theme='gruvbox'] {
+  color-scheme: dark;
+  --hub-bg: #1d2021;
+  --hub-bg-elevated: #282828;
+  --hub-surface: #282828;
+  --hub-surface-2: #32302f;
+  --hub-surface-3: #3c3836;
+  --hub-border: #504945;
+  --hub-border-subtle: rgba(235, 219, 178, 0.1);
+  --hub-text: #ebdbb2;
+  --hub-text-bright: #fbf1c7;
+  --hub-muted: #a89984;
+  --hub-accent: #fe8019;
+  --hub-accent-hover: #d65d0e;
+  --hub-accent-glow: rgba(254, 128, 25, 0.25);
+  --hub-warn: #fabd2f;
+  --hub-danger: #fb4934;
+  --hub-success: #b8bb26;
+}
+
+:root[data-theme='kanagawa'] {
+  color-scheme: dark;
+  --hub-bg: #1f1f28;
+  --hub-bg-elevated: #16161d;
+  --hub-surface: #16161d;
+  --hub-surface-2: #2a2a37;
+  --hub-surface-3: #363646;
+  --hub-border: #363646;
+  --hub-border-subtle: rgba(220, 215, 186, 0.1);
+  --hub-text: #dcd7ba;
+  --hub-text-bright: #f2ecbc;
+  --hub-muted: #727169;
+  --hub-accent: #7e9cd8;
+  --hub-accent-hover: #658594;
+  --hub-accent-glow: rgba(126, 156, 216, 0.25);
+  --hub-warn: #dca561;
+  --hub-danger: #e82424;
+  --hub-success: #98bb6c;
+}
+
+:root[data-theme='github-dark'] {
+  color-scheme: dark;
+  --hub-bg: #0d1117;
+  --hub-bg-elevated: #161b22;
+  --hub-surface: #161b22;
+  --hub-surface-2: #21262d;
+  --hub-surface-3: #30363d;
+  --hub-border: #30363d;
+  --hub-border-subtle: rgba(230, 237, 243, 0.1);
+  --hub-text: #e6edf3;
+  --hub-text-bright: #ffffff;
+  --hub-muted: #8b949e;
+  --hub-accent: #58a6ff;
+  --hub-accent-hover: #388bfd;
+  --hub-accent-glow: rgba(88, 166, 255, 0.25);
+  --hub-warn: #d29922;
+  --hub-danger: #f85149;
+  --hub-success: #3fb950;
 }
 
 * {
@@ -1796,4 +1857,71 @@ button:disabled {
   color: var(--hub-muted);
   font-size: 11.5px;
   pointer-events: none;
+}
+
+/* Theme Picker & Restart Confirmation */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.theme-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--hub-border);
+  background: var(--hub-bg);
+  color: var(--hub-text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: border-color 0.14s ease, background-color 0.14s ease;
+}
+
+.theme-card:hover {
+  border-color: var(--hub-accent);
+  background: var(--hub-surface-2);
+}
+
+.theme-card.active {
+  border-color: var(--hub-accent);
+  background: var(--hub-surface-2);
+  box-shadow: 0 0 0 1px var(--hub-accent);
+}
+
+.theme-swatches {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.theme-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.update-apply-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.restart-confirm-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: rgba(15, 18, 25, 0.55);
+  border: 1px solid var(--hub-accent);
+  color: var(--hub-text-bright);
 }

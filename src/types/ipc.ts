@@ -748,4 +748,11 @@ export const ipc = {
       output_log: '',
     };
   },
+
+  async restartApp(): Promise<void> {
+    if (isTauriEnv()) {
+      return invoke<void>('restart_app');
+    }
+    window.location.reload();
+  },
 };

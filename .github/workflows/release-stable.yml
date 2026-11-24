@@ -2,12 +2,11 @@ name: Release Stable
 
 on:
   push:
-    branches: [stable]
-    tags: ["v*"]
+    tags: ["v*.*.0"]
   workflow_dispatch:
     inputs:
       version_tag:
-        description: "Optional version tag (e.g. v0.4.1). Leave empty to auto-generate."
+        description: "Stable milestone tag (must end in .0, e.g. v0.4.0 or v0.5.0). Leave empty for v<package.json version>."
         required: false
         default: ""
       promote_ref:
@@ -93,7 +92,11 @@ jobs:
             TAG="${GITHUB_REF#refs/tags/}"
           else
             PKG_VER=$(node -p "require('./package.json').version")
-            TAG="v${PKG_VER}-${SHORT_SHA}"
+            TAG="v${PKG_VER}"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.0$ ]]; then
+            echo "Stable releases must follow vX.Y.0 (got: $TAG)" >&2
+            exit 1
           fi
 
           mkdir -p dist-pkg/defaults

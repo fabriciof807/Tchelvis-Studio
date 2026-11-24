@@ -5,6 +5,7 @@ import {
   translate,
   type Locale,
 } from '../i18n';
+import { applyTheme, getInitialTheme, type ThemeId } from '../themes';
 import {
   ipc,
   type AmbientEnvelope,
@@ -67,9 +68,11 @@ interface WorkspaceState {
   previewStatus: PreviewStatus | null;
   previewLightboxOpen: boolean;
 
-  // UI Language & Update Channel
+  // UI Language, Theme & Update Channel
   locale: Locale;
   setLocale: (locale: Locale) => void;
+  theme: ThemeId;
+  setTheme: (theme: ThemeId) => void;
   updateChannel: UpdateChannel;
   setUpdateChannel: (channel: UpdateChannel) => void;
 
@@ -176,6 +179,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       // ignore storage errors
     }
     set({ locale });
+  },
+  theme: getInitialTheme(),
+  setTheme: (theme) => {
+    applyTheme(theme);
+    set({ theme });
   },
   updateChannel: getInitialUpdateChannel(),
   setUpdateChannel: (updateChannel) => {
