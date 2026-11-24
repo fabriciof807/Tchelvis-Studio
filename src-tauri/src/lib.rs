@@ -204,6 +204,11 @@ pub fn cmd_read_markdown_file(
     workspace::read_markdown_file(&root, &rel_path)
 }
 
+pub fn cmd_read_binary_file(state: &AppState, rel_path: String) -> Result<String, String> {
+    let root = state.active_root()?;
+    workspace::read_binary_file_base64(&root, &rel_path)
+}
+
 pub fn cmd_write_markdown_file(
     state: &AppState,
     rel_path: String,
@@ -487,6 +492,14 @@ mod desktop_ipc {
     }
 
     #[tauri::command]
+    pub fn read_binary_file(
+        state: State<'_, AppState>,
+        rel_path: String,
+    ) -> Result<String, String> {
+        cmd_read_binary_file(&state, rel_path)
+    }
+
+    #[tauri::command]
     pub fn write_markdown_file(
         state: State<'_, AppState>,
         rel_path: String,
@@ -694,6 +707,7 @@ mod desktop_ipc {
                 list_recent_workspaces,
                 get_workspace_tree,
                 read_markdown_file,
+                read_binary_file,
                 write_markdown_file,
                 save_layout,
                 load_layout,

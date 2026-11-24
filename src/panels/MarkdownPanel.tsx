@@ -11,6 +11,7 @@ import {
   type FsChangedPayload,
 } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
+import { useI18n } from '../i18n/useI18n';
 import {
   buildMarkdownIndex,
   getWikilinkCompletions,
@@ -178,6 +179,7 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
   const fileTree = useWorkspaceStore((s) => s.fileTree);
   const workspace = useWorkspaceStore((s) => s.workspace);
   const markDirty = useWorkspaceStore((s) => s.markDirty);
+  const { t } = useI18n();
   const registerOpenTab = useWorkspaceStore((s) => s.registerOpenTab);
   const unregisterOpenTab = useWorkspaceStore((s) => s.unregisterOpenTab);
   const requestOpenPanel = useWorkspaceStore((s) => s.requestOpenPanel);
@@ -414,7 +416,7 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
                 className={viewMode === mode ? 'seg-btn active' : 'seg-btn'}
                 onClick={() => setViewMode(mode)}
               >
-                {mode === 'editor' ? 'Editor' : mode === 'split' ? 'Split' : 'Preview'}
+                {mode === 'editor' ? t('md.editor') : mode === 'split' ? t('md.split') : t('md.preview')}
               </button>
             ))}
           </div>
@@ -423,26 +425,26 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
             className="btn-primary-sm"
             disabled={!isDirty}
             onClick={() => void handleSave()}
-            title="Salvar (Ctrl+S)"
+            title={t('md.save')}
           >
-            Salvar
+            {t('md.save')}
           </button>
         </div>
       </div>
 
       {externalConflict && (
         <div className="banner-warning">
-          <span>Este arquivo foi alterado no disco enquanto você possui edições não salvas.</span>
+          <span>{t('md.externalConflict')}</span>
           <div className="banner-actions">
             <button type="button" className="btn-warn-sm" onClick={() => void loadFromDisk()}>
-              Recarregar do disco
+              {t('md.reloadFromDisk')}
             </button>
             <button
               type="button"
               className="btn-ghost-sm"
               onClick={() => setExternalConflict(false)}
             >
-              Manter meu buffer
+              {t('md.keepBuffer')}
             </button>
           </div>
         </div>

@@ -167,3 +167,46 @@ export const MinimizeIcon: React.FC<IconProps> = ({ size = 14, className }) => (
     <line x1="3" x2="10" y1="21" y2="14" />
   </svg>
 );
+
+export const BoxIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" />
+    <path d="m3.3 7 8.7 5 8.7-5" />
+    <path d="M12 22V12" />
+  </svg>
+);
+
+export const ZoomInIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <circle cx="11" cy="11" r="8" />
+    <line x1="21" x2="16.65" y1="21" y2="16.65" />
+    <line x1="11" x2="11" y1="8" y2="14" />
+    <line x1="8" x2="14" y1="11" y2="11" />
+  </svg>
+);
+
+export const ZoomOutIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <circle cx="11" cy="11" r="8" />
+    <line x1="21" x2="16.65" y1="21" y2="16.65" />
+    <line x1="8" x2="14" y1="11" y2="11" />
+  </svg>
+);
+
+export const GridIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <rect width="18" height="18" x="3" y="3" rx="2" />
+    <path d="M3 9h18" />
+    <path d="M3 15h18" />
+    <path d="M9 3v18" />
+    <path d="M15 3v18" />
+  </svg>
+);
+
+export const GlobeIcon: React.FC<IconProps> = ({ size = 15, className }) => (
+  <svg {...baseProps(size, className)}>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+    <path d="M2 12h20" />
+  </svg>
+);

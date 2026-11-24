@@ -358,7 +358,7 @@ fn read_dir_tree(root: &Path, dir: &Path) -> Result<Vec<FileTreeNode>, String> {
     Ok(nodes)
 }
 
-/// Reads a UTF-8 Markdown file within the workspace and returns its content + SHA-256.
+/// Reads a Markdown file (UTF-8) within the workspace and returns its content + SHA-256.
 pub fn read_markdown_file(
     workspace_root: &Path,
     rel_path: &str,
@@ -372,6 +372,22 @@ pub fn read_markdown_file(
         content,
         sha256: sha256_hex(&bytes),
     })
+}
+
+const MAX_BINARY_READ_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
+
+/// Reads a binary asset (image or 3D model) inside the workspace as base64.
+pub fn read_binary_file_base64(workspace_root: &Path, rel_path: &str) -> Result<String, String> {
+    let abs = canonicalize_in_workspace(workspace_root, rel_path)?;
+    let meta = fs::metadata(&abs).map_err(|e| format!("failed to stat {rel_path}: {e}"))?;
+    if meta.len() > MAX_BINARY_READ_BYTES {
+        return Err(format!(
+            "file {rel_path} exceeds maximum preview size ({} > {MAX_BINARY_READ_BYTES} bytes)",
+            meta.len()
+        ));
+    }
+    let bytes = fs::read(&abs).map_err(|e| format!("failed to read {rel_path}: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 
 /// Writes a Markdown file within the workspace and returns the new SHA-256.
@@ -569,5 +585,17 @@ mod tests {
         record_recent_workspace_in(cfg.path(), ws.path()).unwrap();
         let recents = list_recent_workspaces_in(cfg.path()).unwrap();
         assert_eq!(recents.len(), 1);
+    }
+
+    #[test]
+    fn read_binary_file_base64_reads_and_blocks_traversal() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("assets")).unwrap();
+        fs::write(dir.path().join("assets/cube.glb"), b"glTF\x02\x00\x00\x00").unwrap();
+
+        let b64 = read_binary_file_base64(dir.path(), "assets/cube.glb").unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&b64).unwrap();
+        assert_eq!(decoded, b"glTF\x02\x00\x00\x00");
+        assert!(read_binary_file_base64(dir.path(), "../secret.glb").is_err());
     }
 }

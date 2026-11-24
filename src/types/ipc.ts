@@ -433,6 +433,18 @@ export const ipc = {
     return { rel_path: relPath, content, sha256: computeSimpleHash(content) };
   },
 
+  async readBinaryFile(relPath: string): Promise<string> {
+    if (isTauriEnv()) {
+      return invoke<string>('read_binary_file', { relPath });
+    }
+    const content = mockFiles.get(relPath);
+    if (content !== undefined) {
+      return btoa(unescape(encodeURIComponent(content)));
+    }
+    // 1x1 transparent PNG fallback in mock mode
+    return 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+  },
+
   async writeMarkdownFile(relPath: string, content: string): Promise<WriteMarkdownAck> {
     if (isTauriEnv()) {
       return invoke<WriteMarkdownAck>('write_markdown_file', { relPath, content });
@@ -526,7 +538,7 @@ export const ipc = {
     return {
       turn_id: turnId,
       mode: 'offline_fallback',
-      reply_text: `[Pi Durable — Modo Offline] Recebi: "${envelope.user_message}"${attachmentsSummary}${dirtySummary}.`,
+      reply_text: `[Chat — Offline] Recebi: "${envelope.user_message}"${attachmentsSummary}${dirtySummary}.`,
       tool_calls: [],
     };
   },

@@ -1,6 +1,7 @@
 import React, { memo, useRef, useState } from 'react';
 import { ipc } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
+import { useI18n } from '../i18n/useI18n';
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -23,6 +24,7 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 export const ChatPanel: React.FC = memo(() => {
+  const { t } = useI18n();
   const chatMessages = useWorkspaceStore((s) => s.chatMessages);
   const subagentStatuses = useWorkspaceStore((s) => s.subagentStatuses);
   const compactionNotice = useWorkspaceStore((s) => s.compactionNotice);
@@ -107,12 +109,12 @@ export const ChatPanel: React.FC = memo(() => {
     <div className="chat-panel">
       <div className="chat-header">
         <div className="chat-title-row">
-          <span className="chat-title">Pi Durable</span>
-          <span className="chat-subtitle">Chat Criativo</span>
+          <span className="chat-title">{t('chat.title')}</span>
+          <span className="chat-subtitle">{t('chat.subtitle')}</span>
         </div>
         {dirtyFiles.length > 0 && (
           <div className="dirty-indicator" title={dirtyFiles.join('\n')}>
-            {dirtyFiles.length} arquivo(s) não salvo(s) no contexto
+            {t('chat.dirtyFiles', { count: dirtyFiles.length })}
           </div>
         )}
       </div>
@@ -130,26 +132,27 @@ export const ChatPanel: React.FC = memo(() => {
       {compactionNotice && <div className="banner-info">{compactionNotice}</div>}
       {capturesQuotaExceeded && (
         <div className="banner-warning">
-          Cota de .hub/captures/ (200 MiB) excedida. Considere limpar capturas antigas.
+          {t('chat.quotaExceeded')}
         </div>
       )}
       {uploadError && <div className="banner-error">{uploadError}</div>}
 
       <div className="chat-messages">
         {chatMessages.length === 0 && (
-          <div className="chat-empty">
-            Converse com o Pi Durable sobre GDD, worldbuilding ou despache loops de código. Cole
-            imagens com <code>Ctrl+V</code> para anexar capturas <em>one-shot</em>.
-          </div>
+          <div className="chat-empty">{t('chat.empty')}</div>
         )}
         {chatMessages.map((msg) => (
           <div key={msg.id} className={`chat-msg role-${msg.role}`}>
             <div className="chat-msg-meta">
               <span className="chat-msg-author">
-                {msg.role === 'user' ? 'Você' : msg.role === 'assistant' ? 'Pi Durable' : 'Sistema'}
+                {msg.role === 'user'
+                  ? t('chat.roleUser')
+                  : msg.role === 'assistant'
+                    ? t('chat.roleAssistant')
+                    : t('chat.roleSystem')}
               </span>
               {msg.mode === 'offline_fallback' && (
-                <span className="mode-pill">offline</span>
+                <span className="mode-pill">{t('chat.offlineMode')}</span>
               )}
             </div>
             {msg.attachments && msg.attachments.length > 0 && (
@@ -208,7 +211,7 @@ export const ChatPanel: React.FC = memo(() => {
                   type="button"
                   className="chip-remove"
                   onClick={() => removeOneShotAttachment(idx)}
-                  aria-label="Remover anexo"
+                  aria-label={t('chat.removeAttachment')}
                 >
                   <CloseIcon size={11} />
                 </button>
@@ -219,7 +222,7 @@ export const ChatPanel: React.FC = memo(() => {
         <textarea
           className="chat-input"
           rows={3}
-          placeholder="Mensagem para o Pi Durable... (Ctrl+V para colar imagem)"
+          placeholder={t('chat.placeholder')}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onPaste={handlePaste}
@@ -238,14 +241,14 @@ export const ChatPanel: React.FC = memo(() => {
             className="btn-ghost-sm"
             onClick={() => fileInputRef.current?.click()}
           >
-            + Imagem
+            {t('chat.addImage')}
           </button>
           <button
             type="submit"
             className="btn-primary-sm"
             disabled={isSendingChat || (!draft.trim() && oneShotAttachments.length === 0)}
           >
-            {isSendingChat ? 'Enviando...' : 'Enviar'}
+            {isSendingChat ? t('chat.sending') : t('chat.send')}
           </button>
         </div>
       </form>

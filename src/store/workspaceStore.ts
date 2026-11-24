@@ -1,5 +1,11 @@
 import { create } from 'zustand';
 import {
+  getInitialLocale,
+  LOCALE_STORAGE_KEY,
+  translate,
+  type Locale,
+} from '../i18n';
+import {
   ipc,
   type AmbientEnvelope,
   type FileTreeNode,
@@ -25,7 +31,7 @@ export interface ChatMessage {
 
 export interface PanelOpenRequest {
   requestId: string;
-  panelType: 'markdown' | 'loops' | 'terminal' | 'lens';
+  panelType: 'markdown' | 'loops' | 'terminal' | 'lens' | 'media';
   title: string;
   params: Record<string, unknown>;
 }
@@ -60,7 +66,11 @@ interface WorkspaceState {
   previewStatus: PreviewStatus | null;
   previewLightboxOpen: boolean;
 
-  // Chat (Pi Durable)
+  // UI Language
+  locale: Locale;
+  setLocale: (locale: Locale) => void;
+
+  // Chat
   chatMessages: ChatMessage[];
   subagentStatuses: Record<string, { status: string; detail?: string }>;
   compactionNotice: string | null;
@@ -140,6 +150,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   lenses: [],
   previewStatus: null,
   previewLightboxOpen: false,
+
+  locale: getInitialLocale(),
+  setLocale: (locale) => {
+    try {
+      window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+    } catch {
+      // ignore storage errors
+    }
+    set({ locale });
+  },
 
   chatMessages: [],
   subagentStatuses: {},
@@ -409,7 +429,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const errorMsg: ChatMessage = {
         id: `err-${Date.now()}`,
         role: 'system',
-        text: `Erro ao enviar mensagem ao Pi Durable: ${err instanceof Error ? err.message : String(err)}`,
+        text: translate(get().locale, 'chat.sendError', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
         timestamp: new Date().toISOString(),
       };
       set((s) => ({

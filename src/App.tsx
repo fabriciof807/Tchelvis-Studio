@@ -1,11 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { ipc, listenEvent, type FsChangedPayload, type PiEventPayload } from './types/ipc';
 import { useWorkspaceStore } from './store/workspaceStore';
+import { useI18n } from './i18n/useI18n';
 import { DockManager } from './docking/DockManager';
 import { SettingsModal } from './components/SettingsModal';
+import { getMediaKind } from './panels/mediaUtils';
 import { FolderIcon, FolderSearchIcon, SettingsIcon } from './components/Icons';
 
 export const App: React.FC = () => {
+  const { locale, t } = useI18n();
   const workspace = useWorkspaceStore((s) => s.workspace);
   const recentWorkspaces = useWorkspaceStore((s) => s.recentWorkspaces);
   const loadRecentWorkspaces = useWorkspaceStore((s) => s.loadRecentWorkspaces);
@@ -103,7 +106,12 @@ export const App: React.FC = () => {
       } else if (pType === 'terminal') {
         requestOpenPanel('terminal', 'Terminal', {});
       } else {
-        requestOpenPanel('markdown', title, { relPath: payload.path });
+        const mediaKind = getMediaKind(payload.path);
+        if (mediaKind) {
+          requestOpenPanel('media', title, { relPath: payload.path, mediaKind });
+        } else {
+          requestOpenPanel('markdown', title, { relPath: payload.path });
+        }
       }
     }).then((fn) => unlisteners.push(fn));
 
@@ -157,17 +165,14 @@ export const App: React.FC = () => {
                 type="button"
                 className="btn-ghost-sm inline-icon-btn"
                 onClick={() => setSettingsOpen(true)}
-                title="Configurações e Atualizações"
+                title={t('app.settingsTooltip')}
               >
                 <SettingsIcon size={14} />
-                <span>Configurações</span>
+                <span>{t('app.settings')}</span>
               </button>
             </div>
-            <h1>Estúdio Local-First de Game Design &amp; Orquestração</h1>
-            <p className="muted-text">
-              Selecione uma pasta pelo navegador do sistema, escolha um projeto recente ou informe o
-              caminho manualmente.
-            </p>
+            <h1>{t('app.subtitle')}</h1>
+            <p className="muted-text">{t('app.welcomeDesc')}</p>
           </div>
 
           <div className="welcome-picker-row">
@@ -178,7 +183,7 @@ export const App: React.FC = () => {
               disabled={opening}
             >
               <FolderSearchIcon size={16} />
-              <span>{opening ? 'Abrindo...' : 'Escolher Pasta...'}</span>
+              <span>{opening ? t('app.opening') : t('app.pickFolder')}</span>
             </button>
 
             <form
@@ -193,14 +198,14 @@ export const App: React.FC = () => {
                 className="welcome-input"
                 value={manualPath}
                 onChange={(e) => setManualPath(e.target.value)}
-                placeholder="/caminho/para/meu-jogo"
+                placeholder={t('app.pathPlaceholder')}
               />
               <button
                 type="submit"
                 className="btn-ghost-sm"
                 disabled={opening || !manualPath.trim()}
               >
-                Abrir
+                {t('app.open')}
               </button>
             </form>
           </div>
@@ -208,9 +213,9 @@ export const App: React.FC = () => {
           {openError && <div className="banner-error">{openError}</div>}
 
           <div className="recent-section">
-            <h2>Projetos Recentes</h2>
+            <h2>{t('app.recentProjects')}</h2>
             {recentWorkspaces.length === 0 ? (
-              <p className="muted-text">Nenhum projeto recente registrado.</p>
+              <p className="muted-text">{t('app.noRecentProjects')}</p>
             ) : (
               <div className="recent-list">
                 {recentWorkspaces.map((item) => (
@@ -228,7 +233,7 @@ export const App: React.FC = () => {
                       </div>
                     </div>
                     <span className="recent-date">
-                      {new Date(item.last_opened).toLocaleDateString('pt-BR')}
+                      {new Date(item.last_opened).toLocaleDateString(locale)}
                     </span>
                   </button>
                 ))}

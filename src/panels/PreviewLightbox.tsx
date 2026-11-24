@@ -1,7 +1,9 @@
 import React, { useEffect } from 'react';
 import { useWorkspaceStore } from '../store/workspaceStore';
+import { useI18n } from '../i18n/useI18n';
 
 export const PreviewLightbox: React.FC = () => {
+  const { t } = useI18n();
   const previewLightboxOpen = useWorkspaceStore((s) => s.previewLightboxOpen);
   const previewStatus = useWorkspaceStore((s) => s.previewStatus);
   const setPreviewLightboxOpen = useWorkspaceStore((s) => s.setPreviewLightboxOpen);
@@ -33,7 +35,7 @@ export const PreviewLightbox: React.FC = () => {
       className="lightbox-backdrop"
       role="dialog"
       aria-modal="true"
-      aria-label="Preview do Jogo"
+      aria-label={t('preview.ariaLabel')}
     >
       <div className="lightbox-modal">
         <div className="lightbox-header">
@@ -52,7 +54,7 @@ export const PreviewLightbox: React.FC = () => {
               onClick={handleOpenExternal}
               disabled={!previewStatus.url || previewStatus.url === 'about:blank'}
             >
-              Abrir no Navegador Externo
+              {t('preview.openExternal')}
             </button>
             <button
               type="button"
@@ -60,21 +62,21 @@ export const PreviewLightbox: React.FC = () => {
               disabled={!previewStatus.can_capture}
               onClick={() => void capturePreviewFrame()}
             >
-              Capturar Frame + Log
+              {t('preview.captureFrame')}
             </button>
             <button
               type="button"
               className="btn-warn-sm"
               onClick={() => void stopPreview()}
             >
-              Parar Preview
+              {t('preview.stop')}
             </button>
             <button
               type="button"
               className="btn-ghost-sm"
               onClick={() => setPreviewLightboxOpen(false)}
             >
-              Fechar
+              {t('preview.close')}
             </button>
           </div>
         </div>
@@ -87,9 +89,9 @@ export const PreviewLightbox: React.FC = () => {
             />
           ) : (
             <div className="lightbox-placeholder">
-              <p>Preview ativo em modo {previewStatus.mode}.</p>
+              <p>{t('preview.activeMode', { mode: previewStatus.mode })}</p>
               <p className="muted-text">
-                {previewStatus.logs[previewStatus.logs.length - 1] ?? 'Aguardando URL do servidor...'}
+                {previewStatus.logs[previewStatus.logs.length - 1] ?? t('preview.waitingUrl')}
               </p>
             </div>
           )}

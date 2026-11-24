@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ipc } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
+import { useI18n } from '../i18n/useI18n';
 import { MaximizeIcon, MinimizeIcon, PlayIcon, SettingsIcon } from '../components/Icons';
 
 interface PresetsBarProps {
@@ -14,6 +15,7 @@ export const PresetsBar: React.FC<PresetsBarProps> = ({
   onResetDefaultLayout,
   onOpenSettings,
 }) => {
+  const { t } = useI18n();
   const workspace = useWorkspaceStore((s) => s.workspace);
   const zenMode = useWorkspaceStore((s) => s.zenMode);
   const previewStatus = useWorkspaceStore((s) => s.previewStatus);
@@ -69,9 +71,9 @@ export const PresetsBar: React.FC<PresetsBarProps> = ({
         {presets.length > 0 && (
           <select className="select-sm" defaultValue="" onChange={handleSelectPreset}>
             <option value="" disabled>
-              Layout Preset...
+              {t('bar.layoutPreset')}
             </option>
-            <option value="__default__">Padrão</option>
+            <option value="__default__">{t('bar.defaultLayout')}</option>
             {presets.map((p) => (
               <option key={p} value={p}>
                 {p}
@@ -84,34 +86,34 @@ export const PresetsBar: React.FC<PresetsBarProps> = ({
           type="button"
           className={`${zenMode ? 'btn-primary-sm' : 'btn-ghost-sm'} inline-icon-btn`}
           onClick={toggleZenMode}
-          title="Alternar Zen Mode"
+          title={t('bar.toggleZenTooltip')}
         >
           {zenMode ? <MinimizeIcon size={13} /> : <MaximizeIcon size={13} />}
-          <span>{zenMode ? 'Sair do Zen' : 'Zen Mode'}</span>
+          <span>{zenMode ? t('bar.exitZen') : t('bar.zenMode')}</span>
         </button>
 
         <button
           type="button"
           className={`${previewStatus?.running ? 'btn-primary-sm' : 'btn-ghost-sm'} inline-icon-btn`}
           onClick={handlePreviewClick}
-          title="Preview Flutuante (F5)"
+          title={t('bar.previewTooltip')}
         >
           <PlayIcon size={13} />
-          <span>{previewStatus?.running ? 'Preview Ativo (F5)' : 'Preview (F5)'}</span>
+          <span>{previewStatus?.running ? t('bar.previewActive') : t('bar.preview')}</span>
         </button>
 
         <button
           type="button"
           className="btn-ghost-sm inline-icon-btn"
           onClick={onOpenSettings}
-          title="Configurações"
+          title={t('app.settingsTooltip')}
         >
           <SettingsIcon size={13} />
-          <span>Configurações</span>
+          <span>{t('app.settings')}</span>
         </button>
 
         <button type="button" className="btn-ghost-sm" onClick={closeWorkspace}>
-          Trocar Projeto
+          {t('bar.switchProject')}
         </button>
       </div>
     </header>

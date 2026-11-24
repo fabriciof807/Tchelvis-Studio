@@ -187,7 +187,7 @@ impl PiSidecarAdapter for OfflinePiAdapter {
     ) -> Result<PiTurnAck, String> {
         let turn_id = format!("turn-{}", TURN_COUNTER.fetch_add(1, Ordering::Relaxed));
         let reply_text = format!(
-            "[Pi Durable offline fallback: `dpi-backend` not found in $PATH] Received message ({} chars) with focused_panel='{}', {} dirty file(s), {} one-shot attachment(s).",
+            "[Chat offline fallback: `dpi-backend` not found in $PATH] Received message ({} chars) with focused_panel='{}', {} dirty file(s), {} one-shot attachment(s).",
             envelope.user_message.len(),
             envelope.active_context.focused_panel,
             envelope.active_context.dirty_files.len(),

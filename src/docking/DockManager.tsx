@@ -7,18 +7,22 @@ import {
 import 'dockview-react/dist/styles/dockview.css';
 import { ipc, type FileTreeNode } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
+import { useI18n } from '../i18n/useI18n';
 import { PANEL_COMPONENTS } from './panelRegistry';
 import { PresetsBar } from './PresetsBar';
 import { ChatPanel } from '../panels/ChatPanel';
 import { TerminalPanel } from '../panels/TerminalPanel';
 import { PreviewLightbox } from '../panels/PreviewLightbox';
 import { SettingsModal } from '../components/SettingsModal';
+import { getMediaKind } from '../panels/mediaUtils';
 import {
+  BoxIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   CloseIcon,
   FileTextIcon,
   FolderIcon,
+  ImageIcon,
   LayersIcon,
   MessageSquareIcon,
   PlayIcon,
@@ -60,8 +64,9 @@ function clamp(val: number, min: number, max: number): number {
 const FileTreeItem: React.FC<{
   node: FileTreeNode;
   depth: number;
+  unsavedLabel: string;
   onOpenFile: (relPath: string, name: string) => void;
-}> = memo(({ node, depth, onOpenFile }) => {
+}> = memo(({ node, depth, unsavedLabel, onOpenFile }) => {
   const [expanded, setExpanded] = useState(depth < 1);
   const isDirty = useWorkspaceStore((s) => !node.is_dir && s.dirtyFiles.includes(node.rel_path));
 
@@ -85,12 +90,15 @@ const FileTreeItem: React.FC<{
               key={child.rel_path}
               node={child}
               depth={depth + 1}
+              unsavedLabel={unsavedLabel}
               onOpenFile={onOpenFile}
             />
           ))}
       </div>
     );
   }
+
+  const mediaKind = getMediaKind(node.rel_path);
 
   return (
     <button
@@ -100,9 +108,15 @@ const FileTreeItem: React.FC<{
       onClick={() => onOpenFile(node.rel_path, node.name)}
       title={node.rel_path}
     >
-      <FileTextIcon size={13} className="tree-file-icon" />
+      {mediaKind === 'image' ? (
+        <ImageIcon size={13} className="tree-file-icon" />
+      ) : mediaKind === 'model3d' ? (
+        <BoxIcon size={13} className="tree-file-icon" />
+      ) : (
+        <FileTextIcon size={13} className="tree-file-icon" />
+      )}
       <span className="tree-label">{node.name}</span>
-      {isDirty && <span className="tree-dirty-dot" title="Não salvo" />}
+      {isDirty && <span className="tree-dirty-dot" title={unsavedLabel} />}
     </button>
   );
 });
@@ -110,6 +124,7 @@ const FileTreeItem: React.FC<{
 FileTreeItem.displayName = 'FileTreeItem';
 
 export const DockManager: React.FC = () => {
+  const { t } = useI18n();
   const fileTree = useWorkspaceStore((s) => s.fileTree);
   const loopRuns = useWorkspaceStore((s) => s.loopRuns);
   const lenses = useWorkspaceStore((s) => s.lenses);
@@ -272,7 +287,7 @@ export const DockManager: React.FC = () => {
     openDefaultPanels(api);
   };
 
-  // Handle panel open requests from store (wikilinks, explorer, loops, lenses, ui_open)
+  // Handle panel open requests from store (wikilinks, explorer, loops, lenses, media, ui_open)
   useEffect(() => {
     if (!pendingPanelRequest || !dockApiRef.current) return;
     const api = dockApiRef.current;
@@ -281,6 +296,8 @@ export const DockManager: React.FC = () => {
     let panelId = `${panelType}:default`;
     if (panelType === 'markdown' && typeof params.relPath === 'string') {
       panelId = `md:${params.relPath}`;
+    } else if (panelType === 'media' && typeof params.relPath === 'string') {
+      panelId = `media:${params.relPath}`;
     } else if (panelType === 'lens' && typeof params.lensId === 'string') {
       panelId = `lens:${params.lensId}`;
     } else if (panelType === 'loops') {
@@ -309,7 +326,12 @@ export const DockManager: React.FC = () => {
 
   const handleOpenFile = useCallback(
     (relPath: string, name: string) => {
-      requestOpenPanel('markdown', name, { relPath });
+      const mediaKind = getMediaKind(relPath);
+      if (mediaKind) {
+        requestOpenPanel('media', name, { relPath, mediaKind });
+      } else {
+        requestOpenPanel('markdown', name, { relPath });
+      }
     },
     [requestOpenPanel]
   );
@@ -347,12 +369,12 @@ export const DockManager: React.FC = () => {
 
       <div className="hub-workspace-body">
         {/* ~42px Activity Bar */}
-        <aside className="activity-bar" aria-label="Barra de Atividades">
+        <aside className="activity-bar" aria-label="Activity Bar">
           <button
             type="button"
             className={`activity-btn ${!leftCollapsed && activeLeftSection === 'explorer' ? 'active' : ''}`}
             onClick={() => handleActivityClick('explorer')}
-            title="Explorador de Arquivos (Ctrl+B)"
+            title={t('activity.explorer')}
           >
             <FolderIcon size={17} />
           </button>
@@ -360,7 +382,7 @@ export const DockManager: React.FC = () => {
             type="button"
             className={`activity-btn ${!leftCollapsed && activeLeftSection === 'loops' ? 'active' : ''}`}
             onClick={() => handleActivityClick('loops')}
-            title="Loops (Tchelvis-Supervisor)"
+            title={t('activity.loops')}
           >
             <RepeatIcon size={17} />
           </button>
@@ -368,7 +390,7 @@ export const DockManager: React.FC = () => {
             type="button"
             className={`activity-btn ${!leftCollapsed && activeLeftSection === 'lenses' ? 'active' : ''}`}
             onClick={() => handleActivityClick('lenses')}
-            title="Lentes Customizadas (.hub/views/)"
+            title={t('activity.lenses')}
           >
             <LayersIcon size={17} />
           </button>
@@ -383,7 +405,7 @@ export const DockManager: React.FC = () => {
                 ? setPreviewLightboxOpen(true)
                 : void startPreview('main')
             }
-            title="Preview Flutuante (F5)"
+            title={t('activity.preview')}
           >
             <PlayIcon size={16} />
           </button>
@@ -391,7 +413,7 @@ export const DockManager: React.FC = () => {
             type="button"
             className={`activity-btn ${!bottomCollapsed ? 'active' : ''}`}
             onClick={toggleBottom}
-            title="Terminal Inferior (Ctrl+J)"
+            title={t('activity.terminal')}
           >
             <TerminalIcon size={16} />
           </button>
@@ -399,7 +421,7 @@ export const DockManager: React.FC = () => {
             type="button"
             className={`activity-btn ${!rightCollapsed ? 'active' : ''}`}
             onClick={toggleRight}
-            title="Chat Pi Durable (Ctrl+L)"
+            title={t('activity.chat')}
           >
             <MessageSquareIcon size={16} />
           </button>
@@ -407,7 +429,7 @@ export const DockManager: React.FC = () => {
             type="button"
             className="activity-btn"
             onClick={() => setSettingsOpen(true)}
-            title="Configurações e Atualizações"
+            title={t('activity.settings')}
           >
             <SettingsIcon size={16} />
           </button>
@@ -418,25 +440,26 @@ export const DockManager: React.FC = () => {
           {activeLeftSection === 'explorer' && (
             <div className="drawer-section">
               <div className="drawer-header">
-                <span>EXPLORADOR</span>
+                <span>{t('drawer.explorer')}</span>
                 <button
                   type="button"
                   className="btn-icon-xs"
                   onClick={() => void refreshFileTree()}
-                  title="Atualizar árvore"
+                  title={t('drawer.refreshTree')}
                 >
                   <RefreshIcon size={13} />
                 </button>
               </div>
               <div className="drawer-scroll">
                 {fileTree.length === 0 ? (
-                  <div className="drawer-empty">Workspace vazio</div>
+                  <div className="drawer-empty">{t('drawer.emptyWorkspace')}</div>
                 ) : (
                   fileTree.map((node) => (
                     <FileTreeItem
                       key={node.rel_path}
                       node={node}
                       depth={0}
+                      unsavedLabel={t('drawer.unsaved')}
                       onOpenFile={handleOpenFile}
                     />
                   ))
@@ -448,11 +471,11 @@ export const DockManager: React.FC = () => {
           {activeLeftSection === 'loops' && (
             <div className="drawer-section">
               <div className="drawer-header">
-                <span>LOOPS (TCHELVIS)</span>
+                <span>{t('drawer.loops')}</span>
               </div>
               <div className="drawer-scroll">
                 {loopRuns.length === 0 ? (
-                  <div className="drawer-empty">Nenhum loop executado.</div>
+                  <div className="drawer-empty">{t('drawer.noLoops')}</div>
                 ) : (
                   loopRuns.map((run) => (
                     <button
@@ -477,11 +500,11 @@ export const DockManager: React.FC = () => {
           {activeLeftSection === 'lenses' && (
             <div className="drawer-section">
               <div className="drawer-header">
-                <span>LENTES (.hub/views/)</span>
+                <span>{t('drawer.lenses')}</span>
               </div>
               <div className="drawer-scroll">
                 {lenses.length === 0 ? (
-                  <div className="drawer-empty">Nenhuma lente publicada.</div>
+                  <div className="drawer-empty">{t('drawer.noLenses')}</div>
                 ) : (
                   lenses.map((lens) => (
                     <button
@@ -511,7 +534,7 @@ export const DockManager: React.FC = () => {
             onPointerDown={(e) => startResize('left', e)}
             role="separator"
             aria-orientation="vertical"
-            title="Arrastar para redimensionar painel esquerdo"
+            title={t('drawer.resizeLeft')}
           />
         )}
 
@@ -531,18 +554,18 @@ export const DockManager: React.FC = () => {
               onPointerDown={(e) => startResize('bottom', e)}
               role="separator"
               aria-orientation="horizontal"
-              title="Arrastar para redimensionar terminal"
+              title={t('drawer.resizeBottom')}
             />
           )}
 
           <div className={`bottom-drawer ${bottomCollapsed ? 'drawer-collapsed' : ''}`}>
             <div className="drawer-header">
-              <span>TERMINAL</span>
+              <span>{t('drawer.terminal')}</span>
               <button
                 type="button"
                 className="btn-icon-xs"
                 onClick={toggleBottom}
-                title="Recolher Terminal (Ctrl+J)"
+                title={t('drawer.collapseTerminal')}
               >
                 <CloseIcon size={13} />
               </button>
@@ -559,7 +582,7 @@ export const DockManager: React.FC = () => {
             onPointerDown={(e) => startResize('right', e)}
             role="separator"
             aria-orientation="vertical"
-            title="Arrastar para redimensionar chat"
+            title={t('drawer.resizeRight')}
           />
         )}
 
