@@ -19,6 +19,8 @@ import {
   BoxIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  ChevronsDownUpIcon,
+  ChevronsUpDownIcon,
   CloseIcon,
   FileTextIcon,
   FolderIcon,
@@ -61,14 +63,26 @@ function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
 }
 
+interface TreeExpandSignal {
+  expanded: boolean;
+  version: number;
+}
+
 const FileTreeItem: React.FC<{
   node: FileTreeNode;
   depth: number;
   unsavedLabel: string;
+  expandSignal: TreeExpandSignal | null;
   onOpenFile: (relPath: string, name: string) => void;
-}> = memo(({ node, depth, unsavedLabel, onOpenFile }) => {
+}> = memo(({ node, depth, unsavedLabel, expandSignal, onOpenFile }) => {
   const [expanded, setExpanded] = useState(depth < 1);
   const isDirty = useWorkspaceStore((s) => !node.is_dir && s.dirtyFiles.includes(node.rel_path));
+
+  useEffect(() => {
+    if (expandSignal && expandSignal.version > 0) {
+      setExpanded(expandSignal.expanded);
+    }
+  }, [expandSignal]);
 
   if (node.is_dir) {
     return (
@@ -91,6 +105,7 @@ const FileTreeItem: React.FC<{
               node={child}
               depth={depth + 1}
               unsavedLabel={unsavedLabel}
+              expandSignal={expandSignal}
               onOpenFile={onOpenFile}
             />
           ))}
@@ -147,6 +162,19 @@ export const DockManager: React.FC = () => {
   const refreshFileTree = useWorkspaceStore((s) => s.refreshFileTree);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [allFoldersExpanded, setAllFoldersExpanded] = useState(false);
+  const [treeExpandSignal, setTreeExpandSignal] = useState<TreeExpandSignal | null>(null);
+
+  const handleToggleAllFolders = useCallback(() => {
+    setAllFoldersExpanded((prev) => {
+      const next = !prev;
+      setTreeExpandSignal((sig) => ({
+        expanded: next,
+        version: (sig?.version ?? 0) + 1,
+      }));
+      return next;
+    });
+  }, []);
 
   const hubRootRef = useRef<HTMLDivElement | null>(null);
   const sizesRef = useRef<DrawerSizes>(loadDrawerSizes());
@@ -441,14 +469,29 @@ export const DockManager: React.FC = () => {
             <div className="drawer-section">
               <div className="drawer-header">
                 <span>{t('drawer.explorer')}</span>
-                <button
-                  type="button"
-                  className="btn-icon-xs"
-                  onClick={() => void refreshFileTree()}
-                  title={t('drawer.refreshTree')}
-                >
-                  <RefreshIcon size={13} />
-                </button>
+                <div className="drawer-header-actions">
+                  <button
+                    type="button"
+                    className="btn-icon-xs"
+                    onClick={handleToggleAllFolders}
+                    title={allFoldersExpanded ? t('drawer.collapseAll') : t('drawer.expandAll')}
+                    aria-label={allFoldersExpanded ? t('drawer.collapseAll') : t('drawer.expandAll')}
+                  >
+                    {allFoldersExpanded ? (
+                      <ChevronsDownUpIcon size={13} />
+                    ) : (
+                      <ChevronsUpDownIcon size={13} />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-icon-xs"
+                    onClick={() => void refreshFileTree()}
+                    title={t('drawer.refreshTree')}
+                  >
+                    <RefreshIcon size={13} />
+                  </button>
+                </div>
               </div>
               <div className="drawer-scroll">
                 {fileTree.length === 0 ? (
@@ -460,6 +503,7 @@ export const DockManager: React.FC = () => {
                       node={node}
                       depth={0}
                       unsavedLabel={t('drawer.unsaved')}
+                      expandSignal={treeExpandSignal}
                       onOpenFile={handleOpenFile}
                     />
                   ))

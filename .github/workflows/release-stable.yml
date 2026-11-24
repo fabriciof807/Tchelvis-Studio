@@ -131,8 +131,18 @@ jobs:
             git push origin "refs/tags/${TAG}"
           fi
 
+          PREV_TAG=$(git describe --tags --abbrev=0 --match "v*" HEAD^ 2>/dev/null || true)
+          if [ -n "$PREV_TAG" ]; then
+            CHANGES=$(git log --no-merges --pretty=format:"- %h %s" "${PREV_TAG}..HEAD" | head -n 40)
+          else
+            CHANGES=$(git log --no-merges --pretty=format:"- %h %s" -n 20 HEAD)
+          fi
+
           NOTES=$(cat <<EOF
           Stable verified release \`${TAG}\` (commit \`${{ steps.pkg.outputs.short_sha }}\`, ${{ steps.pkg.outputs.published_at }}).
+
+          Changes:
+          ${CHANGES}
           EOF
           )
           gh release create "$TAG" \

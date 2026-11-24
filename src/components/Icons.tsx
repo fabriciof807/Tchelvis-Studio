@@ -210,3 +210,17 @@ export const GlobeIcon: React.FC<IconProps> = ({ size = 15, className }) => (
     <path d="M2 12h20" />
   </svg>
 );
+
+export const ChevronsUpDownIcon: React.FC<IconProps> = ({ size = 13, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="m7 15 5 5 5-5" />
+    <path d="m7 9 5-5 5 5" />
+  </svg>
+);
+
+export const ChevronsDownUpIcon: React.FC<IconProps> = ({ size = 13, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="m7 20 5-5 5 5" />
+    <path d="m7 4 5 5 5-5" />
+  </svg>
+);

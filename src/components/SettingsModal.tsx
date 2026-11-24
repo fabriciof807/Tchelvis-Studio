@@ -53,19 +53,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
 
   if (!open) return null;
 
-  const handleSelectChannel = (channel: UpdateChannel) => {
-    setUpdateChannel(channel);
-    setCheckResult(null);
-    setApplyResult(null);
-    setError(null);
-  };
-
-  const handleCheckUpdates = async () => {
+  const runCheckForChannel = async (channel: UpdateChannel) => {
     setChecking(true);
     setError(null);
     setApplyResult(null);
     try {
-      const res = await ipc.checkForUpdates(updateChannel);
+      const res = await ipc.checkForUpdates(channel);
       setCheckResult(res);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -73,6 +66,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
       setChecking(false);
     }
   };
+
+  const handleSelectChannel = (channel: UpdateChannel) => {
+    setUpdateChannel(channel);
+    setCheckResult(null);
+    setApplyResult(null);
+    setError(null);
+    void runCheckForChannel(channel);
+  };
+
+  const handleCheckUpdates = () => runCheckForChannel(updateChannel);
 
   const handleApplyUpdate = async () => {
     setUpdating(true);
@@ -275,6 +278,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
                   <CheckCircleIcon size={14} />
                   <span>{applyResult.message}</span>
                 </div>
+                {applyResult.changelog.length > 0 && (
+                  <div className="update-applied-changelog">
+                    <strong>{t('settings.appliedChanges')}</strong>
+                    <ul className="update-changelog">
+                      {applyResult.changelog.map((line, i) => (
+                        <li key={i}>
+                          <code>{line}</code>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {applyResult.output_log && (
                   <details className="update-log-details">
                     <summary>{t('settings.viewLog')}</summary>

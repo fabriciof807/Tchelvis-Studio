@@ -274,5 +274,6 @@ pub struct UpdateApplyResult {
     pub new_commit: String,
     pub release_tag: Option<String>,
     pub message: String,
+    pub changelog: Vec<String>,
     pub output_log: String,
 }

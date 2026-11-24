@@ -141,6 +141,7 @@ export interface UpdateApplyResult {
   new_commit: string;
   release_tag?: string | null;
   message: string;
+  changelog: string[];
   output_log: string;
 }
 
@@ -743,6 +744,7 @@ export const ipc = {
       new_commit: 'mock000',
       release_tag: null,
       message: 'Modo navegador (mock): atualização via GitHub disponível apenas no app desktop.',
+      changelog: [],
       output_log: '',
     };
   },

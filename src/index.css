@@ -378,6 +378,12 @@ body.is-resizing iframe {
   border-bottom: 1px solid var(--hub-border);
 }
 
+.drawer-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .drawer-scroll {
   flex: 1;
   overflow-y: auto;
@@ -1245,6 +1251,14 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.update-applied-changelog {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(34, 197, 94, 0.25);
 }
 
 .update-log-details summary {

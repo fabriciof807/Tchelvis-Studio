@@ -79,6 +79,8 @@ export const translations = {
     // Drawers
     'drawer.explorer': 'EXPLORADOR',
     'drawer.refreshTree': 'Atualizar árvore',
+    'drawer.expandAll': 'Expandir todas as pastas',
+    'drawer.collapseAll': 'Recolher todas as pastas',
     'drawer.emptyWorkspace': 'Workspace vazio',
     'drawer.unsaved': 'Não salvo',
     'drawer.loops': 'LOOPS (TCHELVIS)',
@@ -136,6 +138,7 @@ export const translations = {
     'settings.repo': 'Repositório:',
     'settings.updatesAvailable': '{count} atualização(ões) disponível(is):',
     'settings.upToDate': 'Você já está na versão mais recente.',
+    'settings.appliedChanges': 'Mudanças implementadas desde a última versão:',
     'settings.viewLog': 'Ver log da atualização',
 
     // Media Viewer (Images & 3D Models)
@@ -218,6 +221,8 @@ export const translations = {
     // Drawers
     'drawer.explorer': 'EXPLORER',
     'drawer.refreshTree': 'Refresh tree',
+    'drawer.expandAll': 'Expand all folders',
+    'drawer.collapseAll': 'Collapse all folders',
     'drawer.emptyWorkspace': 'Empty workspace',
     'drawer.unsaved': 'Unsaved',
     'drawer.loops': 'LOOPS (TCHELVIS)',
@@ -275,6 +280,7 @@ export const translations = {
     'settings.repo': 'Repository:',
     'settings.updatesAvailable': '{count} update(s) available:',
     'settings.upToDate': 'You are already on the latest version.',
+    'settings.appliedChanges': 'Changes since the last version:',
     'settings.viewLog': 'View update log',
 
     // Media Viewer
@@ -356,6 +362,8 @@ export const translations = {
     // Drawers
     'drawer.explorer': '文件浏览器',
     'drawer.refreshTree': '刷新目录树',
+    'drawer.expandAll': '展开所有文件夹',
+    'drawer.collapseAll': '折叠所有文件夹',
     'drawer.emptyWorkspace': '工作区为空',
     'drawer.unsaved': '未保存',
     'drawer.loops': '循环任务 (TCHELVIS)',
@@ -411,6 +419,7 @@ export const translations = {
     'settings.repo': '仓库:',
     'settings.updatesAvailable': '发现 {count} 个可用更新：',
     'settings.upToDate': '当前已是最新版本。',
+    'settings.appliedChanges': '自上一版本以来的更新内容：',
     'settings.viewLog': '查看更新日志',
 
     // Media Viewer

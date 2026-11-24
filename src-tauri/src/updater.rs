@@ -176,6 +176,32 @@ fn detect_branch_for_channel(repo_dir: &Path, channel: &str) -> String {
     }
 }
 
+fn fetch_github_compare_changelog(repo: &str, base: &str, head: &str) -> Vec<String> {
+    let endpoint = format!("repos/{repo}/compare/{base}...{head}");
+    let out = Command::new("gh")
+        .args([
+            "api",
+            &endpoint,
+            "--jq",
+            r#".commits[-25:][] | "\(.sha[0:7]) \(.commit.message | split("\n")[0])""#,
+        ])
+        .output();
+
+    let Ok(output) = out else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
 fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Option<UpdateCheckResult> {
     let repo = repo_slug();
     let list_out = Command::new("gh")
@@ -298,6 +324,10 @@ fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Optio
                     .collect();
             }
         }
+    }
+
+    if changelog.is_empty() && update_available && current_commit != "unknown" && current_commit != remote_commit {
+        changelog = fetch_github_compare_changelog(&repo, &current_commit, &remote_commit);
     }
 
     if changelog.is_empty() && update_available {
@@ -515,7 +545,24 @@ fn apply_github_release_update(check: &UpdateCheckResult) -> Result<UpdateApplyR
         commit: check.remote_commit.clone(),
     });
 
-    log.push_str(&format!("\nInstalado binário pré-compilado em {}", target_bin.display()));
+    log.push_str(&format!(
+        "\nInstalado binário pré-compilado em {}",
+        target_bin.display()
+    ));
+
+    if !check.changelog.is_empty() {
+        let mut header = format!(
+            "=== Changelog ({} -> {}) ===\n",
+            check.current_commit, check.remote_commit
+        );
+        for line in &check.changelog {
+            header.push_str("  • ");
+            header.push_str(line);
+            header.push('\n');
+        }
+        header.push('\n');
+        log = format!("{header}{log}");
+    }
 
     Ok(UpdateApplyResult {
         channel: check.channel.clone(),
@@ -527,6 +574,7 @@ fn apply_github_release_update(check: &UpdateCheckResult) -> Result<UpdateApplyR
             "Atualização ({} · {}) instalada via CI/CD ({}). Reinicie o Game Dev Hub.",
             check.channel, tag, check.remote_commit
         ),
+        changelog: check.changelog.clone(),
         output_log: tail_chars(&log, 4000),
     })
 }
@@ -534,6 +582,7 @@ fn apply_github_release_update(check: &UpdateCheckResult) -> Result<UpdateApplyR
 /// Switches/pulls `origin/<channel-branch>` and rebuilds via `install.sh` if present.
 pub fn apply_update_in_dir(repo_dir: &Path, channel: &str) -> Result<UpdateApplyResult, String> {
     let channel = normalize_channel(Some(channel));
+    let old_commit = run_git(repo_dir, &["rev-parse", "--short", "HEAD"]).ok();
     let branch = detect_branch_for_channel(repo_dir, channel);
     run_git(repo_dir, &["fetch", "origin", &branch])?;
 
@@ -547,7 +596,36 @@ pub fn apply_update_in_dir(repo_dir: &Path, channel: &str) -> Result<UpdateApply
         run_git(repo_dir, &["checkout", "-B", &branch, &remote_ref])?
     };
 
-    let mut combined_log = format!("$ git channel {channel} ({remote_ref})\n{git_out}\n");
+    let new_commit = run_git(repo_dir, &["rev-parse", "--short", "HEAD"])?;
+    let changelog: Vec<String> = match old_commit.as_deref() {
+        Some(old) if old != new_commit => {
+            let range = format!("{old}..HEAD");
+            run_git(repo_dir, &["log", "--no-merges", "--pretty=format:%h %s", "-n", "30", &range])
+                .unwrap_or_default()
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
+    let mut combined_log = String::new();
+    if !changelog.is_empty() {
+        combined_log.push_str(&format!(
+            "=== Changelog ({} -> {}) ===\n",
+            old_commit.as_deref().unwrap_or("?"),
+            new_commit
+        ));
+        for line in &changelog {
+            combined_log.push_str("  • ");
+            combined_log.push_str(line);
+            combined_log.push('\n');
+        }
+        combined_log.push('\n');
+    }
+    combined_log.push_str(&format!("$ git channel {channel} ({remote_ref})\n{git_out}\n"));
 
     let install_sh = repo_dir.join("install.sh");
     if install_sh.exists() {
@@ -594,6 +672,7 @@ pub fn apply_update_in_dir(repo_dir: &Path, channel: &str) -> Result<UpdateApply
         message: format!(
             "Atualização ({channel} · {new_commit}) aplicada. Reinicie o Game Dev Hub para usar a nova versão."
         ),
+        changelog,
         output_log: tail_chars(&combined_log, 4000),
     })
 }
