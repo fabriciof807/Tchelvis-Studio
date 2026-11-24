@@ -8,6 +8,38 @@ pub struct GlobalConfig {
     pub compositor: CompositorConfig,
     pub preview: PreviewConfig,
     pub sidecar: SidecarConfig,
+    #[serde(default)]
+    pub image_generation: ImageGenerationConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct ImageGenerationConfig {
+    /// Primary backend: "flow_browser" (default) | "gemini_api"
+    pub backend: String,
+    /// Target URL for Google Flow
+    pub flow_url: String,
+    /// Optional fallback backend when primary fails or desktop webview is unavailable
+    pub fallback_backend: Option<String>,
+    /// Gemini image generation model used when backend/fallback is "gemini_api"
+    pub gemini_model: String,
+    /// Default timeout in seconds for Flow generation jobs
+    pub timeout_secs: u64,
+    /// Optional custom path for persistent WebView profile directory
+    pub webview_data_dir: Option<String>,
+}
+
+impl Default for ImageGenerationConfig {
+    fn default() -> Self {
+        Self {
+            backend: "flow_browser".to_string(),
+            flow_url: "https://labs.google/fx/tools/flow".to_string(),
+            fallback_backend: Some("gemini_api".to_string()),
+            gemini_model: "gemini-2.5-flash-image-preview".to_string(),
+            timeout_secs: 90,
+            webview_data_dir: None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -65,6 +97,7 @@ impl Default for GlobalConfig {
                 dpi_backend_bin: "dpi-backend".to_string(),
                 tchelvis_bin: "tchelvis".to_string(),
             },
+            image_generation: ImageGenerationConfig::default(),
         }
     }
 }
@@ -276,4 +309,38 @@ pub struct UpdateApplyResult {
     pub message: String,
     pub changelog: Vec<String>,
     pub output_log: String,
+}
+
+/// Request payload for `dispatch_flow_generation`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FlowGenerationRequest {
+    pub prompt: String,
+    pub save_path: String,
+    pub aspect_ratio: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
+/// Metadata returned when `dispatch_flow_generation` succeeds.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FlowGenerationResult {
+    pub job_id: String,
+    pub status: String,
+    pub saved_path: String,
+    pub byte_size: u64,
+    pub sha256: String,
+    pub markdown_embed: String,
+    pub obsidian_embed: String,
+    pub backend_used: String,
+}
+
+/// Callback payload delivered by the WebView bridge or headless test runner to `flow_bridge_result`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FlowBridgeCallbackPayload {
+    pub job_id: String,
+    pub token: Option<String>,
+    pub status: String,
+    pub image_base64: Option<String>,
+    pub image_bytes: Option<Vec<u8>>,
+    pub mime_type: Option<String>,
+    pub error: Option<String>,
 }

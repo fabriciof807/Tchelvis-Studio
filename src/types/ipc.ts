@@ -145,6 +145,34 @@ export interface UpdateApplyResult {
   output_log: string;
 }
 
+export interface FlowGenerationRequest {
+  prompt: string;
+  save_path: string;
+  aspect_ratio?: string | null;
+  timeout_secs?: number | null;
+}
+
+export interface FlowGenerationResult {
+  job_id: string;
+  status: string;
+  saved_path: string;
+  byte_size: number;
+  sha256: string;
+  markdown_embed: string;
+  obsidian_embed: string;
+  backend_used: string;
+}
+
+export interface FlowBridgeCallbackPayload {
+  job_id: string;
+  token?: string | null;
+  status: string;
+  image_base64?: string | null;
+  image_bytes?: number[] | null;
+  mime_type?: string | null;
+  error?: string | null;
+}
+
 export interface LensInfo {
   lens_id: string;
   title: string;
@@ -754,5 +782,59 @@ export const ipc = {
       return invoke<void>('restart_app');
     }
     window.location.reload();
+  },
+
+  async dispatchFlowGeneration(req: FlowGenerationRequest): Promise<FlowGenerationResult> {
+    if (isTauriEnv()) {
+      return invoke<FlowGenerationResult>('dispatch_flow_generation', {
+        prompt: req.prompt,
+        savePath: req.save_path,
+        aspectRatio: req.aspect_ratio ?? null,
+        timeoutSecs: req.timeout_secs ?? null,
+      });
+    }
+    const cleanPath = req.save_path.trim() || `brainstorm/img/flow-${Date.now()}.png`;
+    const stem = cleanPath.split('/').pop()?.replace(/\.[^.]+$/, '') ?? 'reference';
+    mockFiles.set(cleanPath, 'mock-png-bytes');
+    return {
+      job_id: `mock-flow-${Date.now()}`,
+      status: 'OK',
+      saved_path: cleanPath,
+      byte_size: 1024,
+      sha256: computeSimpleHash(cleanPath),
+      markdown_embed: `![${stem}](${cleanPath})`,
+      obsidian_embed: `![[${cleanPath}]]`,
+      backend_used: 'mock_flow_browser',
+    };
+  },
+
+  async flowBridgeResult(payload: FlowBridgeCallbackPayload): Promise<FlowGenerationResult> {
+    if (isTauriEnv()) {
+      return invoke<FlowGenerationResult>('flow_bridge_result', {
+        jobId: payload.job_id,
+        status: payload.status,
+        imageBytes: payload.image_bytes ?? null,
+        imageBase64: payload.image_base64 ?? null,
+        token: payload.token ?? null,
+        error: payload.error ?? null,
+      });
+    }
+    return {
+      job_id: payload.job_id,
+      status: payload.status,
+      saved_path: 'brainstorm/img/mock.png',
+      byte_size: 128,
+      sha256: 'mock',
+      markdown_embed: '![mock](brainstorm/img/mock.png)',
+      obsidian_embed: '![[brainstorm/img/mock.png]]',
+      backend_used: 'mock',
+    };
+  },
+
+  async openFlowBrowser(): Promise<string> {
+    if (isTauriEnv()) {
+      return invoke<string>('open_flow_browser');
+    }
+    return 'https://labs.google/fx/tools/flow';
   },
 };

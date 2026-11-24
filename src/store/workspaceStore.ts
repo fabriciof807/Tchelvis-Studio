@@ -143,6 +143,29 @@ function getInitialUpdateChannel(): UpdateChannel {
   return 'stable';
 }
 
+function parseFlowSlashCommand(
+  trimmed: string
+): { save_path: string; prompt: string; aspect_ratio?: string } | null {
+  if (!trimmed.startsWith('/flow ')) return null;
+  const rest = trimmed.slice(6).trim();
+  if (!rest) return null;
+
+  const firstSpace = rest.indexOf(' ');
+  const firstToken = firstSpace >= 0 ? rest.slice(0, firstSpace) : rest;
+  const isImagePath = /\.(png|jpe?g|webp)$/i.test(firstToken) && firstSpace > 0;
+
+  if (isImagePath) {
+    return {
+      save_path: firstToken,
+      prompt: rest.slice(firstSpace + 1).trim(),
+    };
+  }
+  return {
+    save_path: `brainstorm/img/flow-${Date.now()}.png`,
+    prompt: rest,
+  };
+}
+
 function computeZenMode(left: boolean, right: boolean, bottom: boolean): boolean {
   return left && right && bottom;
 }
@@ -428,6 +451,74 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       isSendingChat: true,
       chatMessages: [...s.chatMessages, userMsg],
     }));
+
+    const flowCmd = parseFlowSlashCommand(trimmed);
+    if (flowCmd) {
+      const turnId = `flow-turn-${Date.now()}`;
+      const toolId = `flow-tool-${Date.now()}`;
+      const runningTool: PiToolCall = {
+        id: toolId,
+        name: 'generate_flow_reference',
+        arguments_json: JSON.stringify(flowCmd, null, 2),
+        status: 'running',
+      };
+      set((s) => ({
+        chatMessages: [
+          ...s.chatMessages,
+          {
+            id: turnId,
+            role: 'assistant',
+            text: `Gerando referência em \`${flowCmd.save_path}\`...`,
+            timestamp: new Date().toISOString(),
+            tool_calls: [runningTool],
+          },
+        ],
+      }));
+
+      try {
+        const res = await ipc.dispatchFlowGeneration(flowCmd);
+        await get().refreshFileTree().catch(() => {});
+        set((s) => ({
+          isSendingChat: false,
+          chatMessages: s.chatMessages.map((m) =>
+            m.id === turnId
+              ? {
+                  ...m,
+                  text: `Imagem salva em \`${res.saved_path}\` (${res.byte_size} bytes via ${res.backend_used}).\n\nEmbeds:\n- \`${res.markdown_embed}\`\n- \`${res.obsidian_embed}\``,
+                  tool_calls: [
+                    {
+                      ...runningTool,
+                      status: 'completed',
+                      result_json: JSON.stringify(res, null, 2),
+                    },
+                  ],
+                }
+              : m
+          ),
+        }));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        set((s) => ({
+          isSendingChat: false,
+          chatMessages: s.chatMessages.map((m) =>
+            m.id === turnId
+              ? {
+                  ...m,
+                  text: `Falha ao gerar imagem via Flow: ${msg}`,
+                  tool_calls: [
+                    {
+                      ...runningTool,
+                      status: 'error',
+                      result_json: msg,
+                    },
+                  ],
+                }
+              : m
+          ),
+        }));
+      }
+      return;
+    }
 
     try {
       const ack = await ipc.piSendMessage(envelope);

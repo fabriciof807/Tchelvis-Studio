@@ -160,6 +160,33 @@ pub fn read_lens_html(workspace_root: &Path, lens_id: &str) -> Result<String, St
     fs::read_to_string(&abs).map_err(|e| format!("failed to read lens {lens_id}: {e}"))
 }
 
+/// Tool schema exposed to `dpi-backend` for generating visual references via Google Flow.
+pub fn flow_tool_definition() -> serde_json::Value {
+    serde_json::json!({
+        "name": "generate_flow_reference",
+        "description": "Generates a reference image via Google Flow (or configured Gemini image fallback) and saves it directly inside the active workspace.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Detailed visual description in English."
+                },
+                "save_path": {
+                    "type": "string",
+                    "description": "Workspace-relative image path (e.g. world/personagens/img/ferreiro.png)."
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "enum": ["16:9", "1:1", "3:4", "4:3", "9:16"],
+                    "description": "Optional image aspect ratio."
+                }
+            },
+            "required": ["prompt", "save_path"]
+        }
+    })
+}
+
 /// Adapter boundary for `Pi Durable` (`dpi-backend`).
 pub trait PiSidecarAdapter: Send {
     fn mode(&self) -> &'static str;
@@ -224,8 +251,11 @@ impl ProcessPiAdapter {
                 return Ok(());
             }
         }
+        let tools_json = serde_json::to_string(&vec![flow_tool_definition()]).unwrap_or_default();
         let mut cmd = Command::new(&self.bin_path);
         cmd.current_dir(workspace_root)
+            .env("GAME_HUB_TOOLS_JSON", tools_json)
+            .env("GAME_HUB_WORKSPACE_ROOT", workspace_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

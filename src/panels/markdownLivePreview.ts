@@ -59,6 +59,37 @@ class BulletWidget extends WidgetType {
   }
 }
 
+export const OBSIDIAN_IMG_REGEX =
+  /!\[\[([^\]|]+?\.(?:png|jpe?g|webp|gif|svg|avif|bmp))(?:\|([^\]]*))?\]\]/gi;
+export const MARKDOWN_IMG_REGEX = /!\[([^\]]*)\]\(([^)]+)\)/g;
+export const WIKILINK_REGEX = /(?<!!)\[\[([^\]]+)\]\]/g;
+
+export interface ParsedImageEmbed {
+  index: number;
+  length: number;
+  src: string;
+  alt: string;
+}
+
+export function findImageEmbedsInLine(text: string): ParsedImageEmbed[] {
+  const results: ParsedImageEmbed[] = [];
+  const mdRegex = new RegExp(MARKDOWN_IMG_REGEX.source, 'g');
+  let m: RegExpExecArray | null;
+  while ((m = mdRegex.exec(text)) !== null) {
+    results.push({ index: m.index, length: m[0].length, alt: m[1] ?? '', src: m[2] ?? '' });
+  }
+  const obsRegex = new RegExp(OBSIDIAN_IMG_REGEX.source, 'gi');
+  while ((m = obsRegex.exec(text)) !== null) {
+    results.push({
+      index: m.index,
+      length: m[0].length,
+      src: (m[1] ?? '').trim(),
+      alt: (m[2] ?? m[1] ?? '').trim(),
+    });
+  }
+  return results;
+}
+
 function resolveImageUrl(rawSrc: string, workspaceRoot?: string): string {
   const trimmed = rawSrc.trim();
   if (
@@ -222,19 +253,17 @@ function buildLiveDecorations(view: EditorView, workspaceRoot?: string): Decorat
         }
       }
 
-      // Inline image widget (always rendered cleanly below/in place if cursor is off line, or below line if on line)
-      const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-      let imgMatch: RegExpExecArray | null;
-      while ((imgMatch = imgRegex.exec(text)) !== null) {
-        const mFrom = line.from + imgMatch.index;
-        const mTo = mFrom + imgMatch[0].length;
-        const resolved = resolveImageUrl(imgMatch[2], workspaceRoot);
+      // Inline image widgets: ![alt](src) and Obsidian ![[path.png|alt]]
+      for (const embed of findImageEmbedsInLine(text)) {
+        const mFrom = line.from + embed.index;
+        const mTo = mFrom + embed.length;
+        const resolved = resolveImageUrl(embed.src, workspaceRoot);
         if (!isCursorLine) {
           items.push({
             from: mFrom,
             to: mTo,
             deco: Decoration.replace({
-              widget: new InlineImageWidget(resolved, imgMatch[1]),
+              widget: new InlineImageWidget(resolved, embed.alt),
             }),
           });
         }
@@ -298,8 +327,8 @@ function buildLiveDecorations(view: EditorView, workspaceRoot?: string): Decorat
           items.push({ from: end - 1, to: end, deco: Decoration.replace({}) });
         }
 
-        // Wikilinks [[target]] or [[target|alias]]
-        const wikiRegex = /\[\[([^\]]+)\]\]/g;
+        // Wikilinks [[target]] or [[target|alias]] (negative lookbehind avoids ![[...]])
+        const wikiRegex = new RegExp(WIKILINK_REGEX.source, 'g');
         while ((m = wikiRegex.exec(text)) !== null) {
           const start = line.from + m.index;
           const end = start + m[0].length;

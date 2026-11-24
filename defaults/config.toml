@@ -28,3 +28,13 @@ healthcheck_timeout_ms = 10000
 # Optional explicit paths; defaults to searching $PATH
 dpi_backend_bin = "dpi-backend"
 tchelvis_bin = "tchelvis"
+
+[image_generation]
+# Primary backend: "flow_browser" | "gemini_api"
+backend = "flow_browser"
+# Google Flow URL opened in the persistent WebView window
+flow_url = "https://labs.google/fx/tools/flow"
+# Optional fallback when browser session is unavailable and GEMINI_API_KEY is set
+fallback_backend = "gemini_api"
+gemini_model = "gemini-2.5-flash-image-preview"
+timeout_secs = 90

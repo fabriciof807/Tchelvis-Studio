@@ -1,4 +1,5 @@
 pub mod compositor;
+pub mod flow_bridge;
 pub mod fs_watcher;
 pub mod git_ops;
 pub mod preview;
@@ -23,10 +24,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use types::{
-    AmbientEnvelope, CaptureResult, CaptureSaved, FileTreeNode, GlobalConfig, LensInfo,
-    LoopRunState, MarkdownFilePayload, MergeCheckResult, MergeResult, PiTurnAck, PreviewStatus,
-    ProjectConfig, RecentWorkspace, UpdateApplyResult, UpdateCheckResult, WorkspaceInfo,
-    WriteMarkdownResult,
+    AmbientEnvelope, CaptureResult, CaptureSaved, FileTreeNode, FlowBridgeCallbackPayload,
+    FlowGenerationResult, GlobalConfig, LensInfo, LoopRunState, MarkdownFilePayload,
+    MergeCheckResult, MergeResult, PiTurnAck, PreviewStatus, ProjectConfig, RecentWorkspace,
+    UpdateApplyResult, UpdateCheckResult, WorkspaceInfo, WriteMarkdownResult,
 };
 
 /// Shared microkernel state used by both headless tests and Tauri desktop IPC.
@@ -43,6 +44,7 @@ pub struct AppState {
     pub compositor: Box<dyn CompositorAdapter>,
     pub watcher: Mutex<Option<WorkspaceWatcher>>,
     pub control_socket: Mutex<Option<ControlSocket>>,
+    pub flow_bridge: Arc<flow_bridge::FlowBridgeManager>,
 }
 
 impl AppState {
@@ -53,12 +55,14 @@ impl AppState {
         });
         let compositor = HyprlandCompositorAdapter::detect();
         let control_socket = ControlSocket::bind().ok();
+        let echo_cache = Arc::new(Mutex::new(EchoSuppressionCache::default()));
+        let flow_bridge = Arc::new(flow_bridge::FlowBridgeManager::new(Arc::clone(&echo_cache)));
 
         Self {
             workspace_root: Mutex::new(None),
             project_config: Mutex::new(None),
             global_config: Mutex::new(global_config),
-            echo_cache: Arc::new(Mutex::new(EchoSuppressionCache::default())),
+            echo_cache,
             loop_state_cache: Mutex::new(LoopStateCache::default()),
             pty_manager: PtyManager::new(),
             pi_adapter: Mutex::new(pi_adapter),
@@ -67,6 +71,7 @@ impl AppState {
             compositor,
             watcher: Mutex::new(None),
             control_socket: Mutex::new(control_socket),
+            flow_bridge,
         }
     }
 
@@ -445,6 +450,56 @@ pub fn cmd_apply_update(channel: Option<String>) -> Result<UpdateApplyResult, St
     updater::apply_update(channel.as_deref())
 }
 
+pub fn cmd_flow_bridge_result(
+    state: &AppState,
+    job_id: String,
+    status: String,
+    image_bytes: Option<Vec<u8>>,
+    image_base64: Option<String>,
+    token: Option<String>,
+    error: Option<String>,
+) -> Result<FlowGenerationResult, String> {
+    state.flow_bridge.resolve_job(
+        FlowBridgeCallbackPayload {
+            job_id,
+            token,
+            status,
+            image_base64,
+            image_bytes,
+            mime_type: None,
+            error,
+        },
+        false,
+    )
+}
+
+pub async fn cmd_dispatch_flow_generation<D: flow_bridge::FlowBrowserDriver>(
+    state: &AppState,
+    driver: &D,
+    prompt: String,
+    save_path: String,
+    aspect_ratio: Option<String>,
+    timeout_secs: Option<u64>,
+) -> Result<FlowGenerationResult, String> {
+    let root = state.active_root()?;
+    let img_cfg = state
+        .global_config
+        .lock()
+        .map(|g| g.image_generation.clone())
+        .unwrap_or_default();
+    flow_bridge::dispatch_flow_generation_with_driver(
+        Arc::clone(&state.flow_bridge),
+        driver,
+        &root,
+        &img_cfg,
+        prompt,
+        save_path,
+        aspect_ratio,
+        timeout_secs,
+    )
+    .await
+}
+
 #[cfg(feature = "desktop")]
 mod desktop_ipc {
     use super::*;
@@ -717,6 +772,93 @@ mod desktop_ipc {
         app.restart();
     }
 
+    #[tauri::command]
+    pub async fn dispatch_flow_generation(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+        prompt: String,
+        save_path: String,
+        aspect_ratio: Option<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<FlowGenerationResult, String> {
+        let driver = flow_bridge::desktop_driver::TauriWebviewFlowDriver { app: app.clone() };
+        let res = cmd_dispatch_flow_generation(
+            &state,
+            &driver,
+            prompt,
+            save_path,
+            aspect_ratio,
+            timeout_secs,
+        )
+        .await?;
+        let _ = app.emit(
+            "fs://changed",
+            serde_json::json!({
+                "rel_path": res.saved_path,
+                "kind": "create",
+                "sha256": res.sha256,
+            }),
+        );
+        let _ = app.emit("flow://status", &res);
+        Ok(res)
+    }
+
+    #[tauri::command]
+    pub fn flow_bridge_result(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+        job_id: String,
+        status: String,
+        image_bytes: Option<Vec<u8>>,
+        image_base64: Option<String>,
+        token: Option<String>,
+        error: Option<String>,
+    ) -> Result<FlowGenerationResult, String> {
+        let res = cmd_flow_bridge_result(
+            &state,
+            job_id,
+            status,
+            image_bytes,
+            image_base64,
+            token,
+            error,
+        )?;
+        let _ = app.emit(
+            "fs://changed",
+            serde_json::json!({
+                "rel_path": res.saved_path,
+                "kind": "create",
+                "sha256": res.sha256,
+            }),
+        );
+        let _ = app.emit("flow://status", &res);
+        Ok(res)
+    }
+
+    #[tauri::command]
+    pub fn open_flow_browser(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<String, String> {
+        let global_img = state
+            .global_config
+            .lock()
+            .map(|g| g.image_generation.clone())
+            .unwrap_or_default();
+        let cfg = match state.active_root() {
+            Ok(root) => flow_bridge::resolve_image_generation_config(&root, &global_img),
+            Err(_) => global_img,
+        };
+        let profile_dir = flow_bridge::resolve_webview_profile_dir(&cfg)?;
+        flow_bridge::desktop_driver::open_or_focus_flow_window(
+            &app,
+            &cfg.flow_url,
+            &profile_dir,
+            Some(Arc::clone(&state.flow_bridge)),
+        )?;
+        Ok(cfg.flow_url)
+    }
+
     pub fn run_desktop(global_config: GlobalConfig) {
         tauri::Builder::default()
             .plugin(tauri_plugin_fs::init())
@@ -756,6 +898,9 @@ mod desktop_ipc {
                 check_for_updates,
                 apply_update,
                 restart_app,
+                dispatch_flow_generation,
+                flow_bridge_result,
+                open_flow_browser,
             ])
             .run(tauri::generate_context!())
             .expect("error while running Game Dev Hub");
