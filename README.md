@@ -1,56 +1,58 @@
+**English** | [Português (Brasil)](README.pt-BR.md) | [简体中文](README.zh-CN.md)
+
 # Tchelvis Studio (Game Dev Hub)
 
-**Estúdio desktop *local-first* para Game Design, Worldbuilding e Orquestração de Agentes de IA.**
+**A local-first desktop studio for Game Design, Worldbuilding, and AI Agent Orchestration.**
 
-Construído com **Tauri v2 (Rust + WebKitGTK)**, **React 19**, **TypeScript**, **Dockview**, **CodeMirror 6**, **xterm.js** e **Three.js**, o Tchelvis Studio reúne documentação em Markdown, chat assistido, geração de referências visuais, visualização de assets 2D/3D, terminal embutido e monitoramento de loops automatizados em um único workspace sobre arquivos locais.
-
----
-
-## Casos de Uso
-
-- **Pré-produção criativa, GDD e Worldbuilding:** Escreva documentos de design (`gdd/`, `world/`, `brainstorm/`) com *Live Preview* editável estilo Obsidian, `[[wikilinks]]` clicáveis com autocomplete e resolução de colisões.
-- **Desenvolvimento assistido por agentes com Firewall de Contexto:** Converse no painel de **Chat** enviando automaticamente contexto do arquivo focado, abas abertas, arquivos não salvos (`dirty_files`) e capturas de tela coladas com `Ctrl+V` (*one-shot attachments*), enquanto tarefas longas de código rodam isoladas em *git worktrees* via `tchelvis`.
-- **Geração de referências visuais direto no projeto:** Use o comando `/flow <caminho.png> <prompt>` ou a tool `generate_flow_reference` para gerar imagens via **Google Flow** (com sessão autenticada persistente em WebView dedicada) ou fallback via **Gemini Image API** (`GEMINI_API_KEY`), salvando e exibindo imediatamente no documento (`![[imagem.png]]` ou `![alt](imagem.png)`).
-- **Inspeção rápida de assets 2D e modelos 3D:** Clique em imagens (`.png`, `.jpg`, `.webp`, `.svg`, etc.) ou modelos 3D (`.glb`, `.gltf`, `.obj`, `.stl`, `.fbx`) no explorador de arquivos para abrir o visualizador integrado com zoom/fundo xadrez ou órbita 3D, grade e wireframe.
-- **Preview de protótipos Godot 4 e Web/Three.js:** Inicie servidores Vite em portas dinâmicas (`F5`) com lightbox 16:9 e botão para navegador externo, ou rode builds *staging* do Godot 4 com cache CoW (`cp --reflink=auto`), integração opcional com Hyprland/`grim` e merge seguro de *worktrees*.
+Built with **Tauri v2 (Rust + WebKitGTK)**, **React 19**, **TypeScript**, **Dockview**, **CodeMirror 6**, **xterm.js**, and **Three.js**, Tchelvis Studio brings Markdown GDD authoring, assisted chat, visual reference generation, 2D/3D asset inspection, an embedded terminal, and automated loop monitoring into a single workspace backed directly by plain local files.
 
 ---
 
-## Diferenciais
+## Use Cases
 
-- **100% Local-First (Zero Banco Proprietário):** Todo o conteúdo fica em arquivos comuns Markdown, JSON e TOML compatíveis com Git, Obsidian e VS Code.
-- **Live Preview Único Estilo Obsidian:** Edite diretamente sobre o documento renderizado (títulos, negrito, itálico, código, citações, listas, imagens inline e wikilinks); a sintaxe aparece apenas na linha onde está o cursor.
-- **Visualizador Integrado de Imagens e Modelos 3D:** Inspecione sprites, concept art e malhas 3D direto pelo explorador sem abrir ferramentas externas.
-- **Terminal PTY Nativo + Zen Mode Instantâneo:** Terminal real (`$SHELL` via `portable-pty`) com repasse de atalhos (`Ctrl+B`, `Ctrl+L`, `Ctrl+J`, `F5`) que permanece vivo ao entrar/sair do Zen Mode, além de painéis laterais e inferior redimensionáveis arrastando as bordas.
-- **Lentes Read-Only em Sandbox:** Visualizações customizadas (`.hub/views/*.html`) isoladas em `<iframe sandbox="allow-scripts">` com CSP sem rede e ponte `postMessage` validada.
-- **Temas & Multi-Idioma:** 4 temas embutidos (**Tokyo Night**, **Gruvbox**, **Kanagawa**, **GitHub Dark**) e suporte a **Português (Brasil)**, **English** e **简体中文** com detecção automática do idioma do sistema na primeira execução.
-- **Dois Canais de Atualização (CI/CD):**
-  - **Stable (`0.x.0`):** Releases testadas e consolidadas (`v0.4.0`, `v0.5.0`, etc.).
-  - **Nightly (`0.x.x`):** Builds contínuas *bleeding edge* com as últimas correções e recursos.
+- **Creative Pre-Production, GDD & Worldbuilding:** Author design documents (`gdd/`, `world/`, `brainstorm/`) with an Obsidian-style editable *Live Preview*, clickable `[[wikilinks]]`, autocomplete, and collision resolution.
+- **Agent-Assisted Development with a Context Firewall:** Use the **Chat** panel to automatically attach your focused panel, open tabs, unsaved files (`dirty_files`), and clipboard screenshots (`Ctrl+V` one-shot attachments), while long coding tasks run isolated in *git worktrees* via `tchelvis`.
+- **In-Project Visual Reference Generation:** Run `/flow <save_path.png> <prompt>` or the `generate_flow_reference` tool to generate concept art via **Google Flow** (using a persistent authenticated WebView profile) or fall back to the **Gemini Image API** (`GEMINI_API_KEY`), saving straight into your project for immediate preview (`![[image.png]]` or `![alt](image.png)`).
+- **2D Image & 3D Model Inspection:** Click images (`.png`, `.jpg`, `.webp`, `.svg`, etc.) or 3D models (`.glb`, `.gltf`, `.obj`, `.stl`, `.fbx`) in the file explorer to open the built-in viewer with zoom/checkerboard controls or 3D orbit, grid, and wireframe modes.
+- **Godot 4 & Web/Three.js Prototype Previews:** Launch Vite dev servers on dynamic ports (`F5`) with a 16:9 lightbox and external browser fallback, or run Godot 4 staging builds with CoW cache (`cp --reflink=auto`), optional Hyprland/`grim` integration, and safe worktree merging.
 
 ---
 
-## Como Instalar (Linux / Arch / EndeavourOS)
+## Key Differentiators
 
-### Canal Stable (`0.x.0` — Recomendado)
+- **100% Local-First (No Proprietary Database):** Everything lives in standard Markdown, JSON, and TOML files — fully compatible with Git, Obsidian, and VS Code.
+- **Unified Obsidian-Style Live Preview:** Edit directly on the rendered document (headings, bold, italic, inline code, quotes, lists, inline images, and wikilinks); raw Markdown syntax is revealed only on the active cursor line.
+- **Built-in Image & 3D Model Viewer:** Inspect sprites, concept art, and 3D meshes directly from the file explorer without switching apps.
+- **Native PTY Terminal + Instant Zen Mode:** Real `$SHELL` terminal (`portable-pty`) with Hub shortcut pass-through (`Ctrl+B`, `Ctrl+L`, `Ctrl+J`, `F5`) that stays alive across Zen Mode toggles, plus draggable splitters on every drawer border.
+- **Sandboxed Read-Only Lenses:** Custom HTML views (`.hub/views/*.html`) run inside `<iframe sandbox="allow-scripts">` with network-disabled CSP and a validated `postMessage` bridge.
+- **Themes & Multi-Language:** Includes 4 built-in themes (**Tokyo Night**, **Gruvbox**, **Kanagawa**, **GitHub Dark**) and **English**, **Português (Brasil)**, and **简体中文** with automatic OS language detection on first launch.
+- **Dual CI/CD Update Channels:**
+  - **Stable (`0.x.0`):** Tested milestone releases (`v0.4.0`, `v0.5.0`, etc.).
+  - **Nightly (`0.x.x`):** Continuous bleeding-edge builds with the latest fixes and features.
+
+---
+
+## Installation (Linux / Arch / EndeavourOS)
+
+### Stable Channel (`0.x.0` — Recommended)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/stable/install.sh | bash
 ```
 
-### Canal Nightly (`0.x.x` — Bleeding Edge)
+### Nightly Channel (`0.x.x` — Bleeding Edge)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/nightly/install.sh | bash -s -- --channel nightly
 ```
 
-O instalador `install.sh`:
-1. Instala dependências de runtime necessárias no Arch/EndeavourOS via `pacman` (`webkit2gtk-4.1`, `gtk3`, `dbus`, `libayatana-appindicator`, `librsvg`, `xdotool`).
-2. Baixa a release pré-compilada pelo CI/CD do GitHub (com verificação `SHA256SUMS.txt`) e instala o binário em `~/.local/bin/game-hub`.
-3. Se ainda não houver release pré-compilada para o canal ou se `--from-source` for passado, clona em `~/.local/share/game-hub` e compila localmente (`npm ci && npm run build` + `cargo build --release --features desktop,custom-protocol`).
-4. Copia configurações padrão para `~/.config/game-hub/` e cria o atalho `~/.local/share/applications/game-hub.desktop`.
+What `install.sh` does:
+1. Installs required Arch/EndeavourOS runtime packages via `pacman` (`webkit2gtk-4.1`, `gtk3`, `dbus`, `libayatana-appindicator`, `librsvg`, `xdotool`).
+2. Downloads the prebuilt CI/CD GitHub Release binary (verifying `SHA256SUMS.txt`) and installs it to `~/.local/bin/game-hub`.
+3. If no prebuilt release exists yet for the chosen channel or `--from-source` is passed, clones into `~/.local/share/game-hub` and builds locally (`npm ci && npm run build` + `cargo build --release --features desktop,custom-protocol`).
+4. Seeds default configuration into `~/.config/game-hub/` and creates `~/.local/share/applications/game-hub.desktop`.
 
-> **Dica:** Certifique-se de que `~/.local/bin` está no seu `PATH`. Depois, basta executar `game-hub` ou abrir **Game Dev Hub** no launcher do sistema.
+> **Tip:** Make sure `~/.local/bin` is in your `PATH`. Run `game-hub` from your terminal or launch **Game Dev Hub** from your app launcher.
 
-### Instalação Manual (Desenvolvimento)
+### Manual Build (Development)
 ```bash
 git clone https://github.com/fabriciof807/Tchelvis-Studio.git
 cd Tchelvis-Studio
@@ -61,21 +63,21 @@ cargo build --manifest-path src-tauri/Cargo.toml --release --features desktop,cu
 
 ---
 
-## Como Atualizar
+## Updating
 
-Dentro do próprio aplicativo:
-1. Abra **Configurações** (ícone de engrenagem na barra lateral, na barra superior ou na tela inicial).
-2. Escolha o canal desejado (**Stable** ou **Nightly**).
-3. Clique em **Procurar Atualizações** para ver a versão remota e o changelog desde a sua versão atual.
-4. Clique em **Atualizar Agora** e depois em **Reiniciar Agora** (com confirmação).
+From inside the app:
+1. Open **Settings** (gear icon in the Activity Bar, top bar, or Welcome screen).
+2. Select your update channel (**Stable** or **Nightly**).
+3. Click **Check for Updates** to view the remote version and changelog since your current build.
+4. Click **Update Now**, then click **Restart Now** (with confirmation).
 
-Ou pelo terminal executando novamente o comando `curl` de instalação acima.
+Or re-run the `curl` install command above in your terminal.
 
 ---
 
-## Como Remover (Desinstalar)
+## Uninstalling
 
-Para remover completamente o aplicativo, atalhos, cache de instalação e configurações globais:
+To completely remove the binary, desktop entry, installation cache, and global configuration:
 
 ```bash
 rm -f ~/.local/bin/game-hub
@@ -85,23 +87,23 @@ rm -rf ~/.config/game-hub
 rm -rf ~/.local/state/game-hub
 ```
 
-*(Os arquivos dos seus projetos/workspaces permanecem intactos nas respectivas pastas.)*
+*(Your project/workspace directories remain untouched.)*
 
 ---
 
-## Atalhos Padrão
+## Default Shortcuts
 
-| Atalho | Ação |
+| Shortcut | Action |
 | :--- | :--- |
-| `Ctrl+B` | Recolher / expandir painel esquerdo (Explorador, Loops, Lentes) |
-| `Ctrl+L` | Recolher / expandir Chat |
-| `Ctrl+J` | Recolher / expandir Terminal inferior |
-| `F5` | Abrir / focar Preview do projeto |
-| `Ctrl+S` | Salvar documento Markdown ativo |
-| `Ctrl+V` (no Chat) | Colar captura de imagem da área de transferência como anexo *one-shot* |
+| `Ctrl+B` | Toggle left drawer (Explorer, Loops, Lenses) |
+| `Ctrl+L` | Toggle Chat drawer |
+| `Ctrl+J` | Toggle bottom Terminal drawer |
+| `F5` | Open / focus Project Preview |
+| `Ctrl+S` | Save active Markdown document |
+| `Ctrl+V` (in Chat) | Paste clipboard screenshot as a one-shot attachment |
 
 ---
 
-## Licença
+## License
 
-Consulte o repositório para informações de licenciamento e contribuições.
+See repository metadata for licensing and contribution details.
