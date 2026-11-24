@@ -118,19 +118,28 @@ export interface SaveCaptureResult {
   quota_exceeded: boolean;
 }
 
+export type UpdateChannel = 'stable' | 'nightly';
+
 export interface UpdateCheckResult {
+  channel: UpdateChannel | string;
+  source: 'github-release' | 'git-branch' | string;
   repo_dir: string;
   branch: string;
+  release_tag?: string | null;
   current_commit: string;
   remote_commit: string;
   commits_behind: number;
   update_available: boolean;
+  has_prebuilt_asset: boolean;
   changelog: string[];
 }
 
 export interface UpdateApplyResult {
+  channel: UpdateChannel | string;
+  source: 'github-release' | 'git-branch' | string;
   updated: boolean;
   new_commit: string;
+  release_tag?: string | null;
   message: string;
   output_log: string;
 }
@@ -704,28 +713,35 @@ export const ipc = {
     return '/home/ubuntu/projetos/forja-cinza';
   },
 
-  async checkForUpdates(): Promise<UpdateCheckResult> {
+  async checkForUpdates(channel: UpdateChannel = 'stable'): Promise<UpdateCheckResult> {
     if (isTauriEnv()) {
-      return invoke<UpdateCheckResult>('check_for_updates');
+      return invoke<UpdateCheckResult>('check_for_updates', { channel });
     }
     return {
+      channel,
+      source: 'git-branch',
       repo_dir: '~/.local/share/game-hub',
-      branch: 'master',
+      branch: channel,
+      release_tag: null,
       current_commit: 'mock000',
       remote_commit: 'mock000',
       commits_behind: 0,
       update_available: false,
+      has_prebuilt_asset: false,
       changelog: [],
     };
   },
 
-  async applyUpdate(): Promise<UpdateApplyResult> {
+  async applyUpdate(channel: UpdateChannel = 'stable'): Promise<UpdateApplyResult> {
     if (isTauriEnv()) {
-      return invoke<UpdateApplyResult>('apply_update');
+      return invoke<UpdateApplyResult>('apply_update', { channel });
     }
     return {
+      channel,
+      source: 'git-branch',
       updated: false,
       new_commit: 'mock000',
+      release_tag: null,
       message: 'Modo navegador (mock): atualização via GitHub disponível apenas no app desktop.',
       output_log: '',
     };

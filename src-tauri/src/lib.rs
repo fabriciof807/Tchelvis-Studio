@@ -437,12 +437,12 @@ pub fn cmd_git_cleanup_worktree(state: &AppState, run_id: String) -> Result<(), 
     git_ops::cleanup_worktree(&root, &run_id)
 }
 
-pub fn cmd_check_for_updates() -> Result<UpdateCheckResult, String> {
-    updater::check_for_updates()
+pub fn cmd_check_for_updates(channel: Option<String>) -> Result<UpdateCheckResult, String> {
+    updater::check_for_updates(channel.as_deref())
 }
 
-pub fn cmd_apply_update() -> Result<UpdateApplyResult, String> {
-    updater::apply_update()
+pub fn cmd_apply_update(channel: Option<String>) -> Result<UpdateApplyResult, String> {
+    updater::apply_update(channel.as_deref())
 }
 
 #[cfg(feature = "desktop")]
@@ -684,15 +684,15 @@ mod desktop_ipc {
     }
 
     #[tauri::command]
-    pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
-        tokio::task::spawn_blocking(cmd_check_for_updates)
+    pub async fn check_for_updates(channel: Option<String>) -> Result<UpdateCheckResult, String> {
+        tokio::task::spawn_blocking(move || cmd_check_for_updates(channel))
             .await
             .map_err(|e| format!("Falha ao verificar atualizações: {e}"))?
     }
 
     #[tauri::command]
-    pub async fn apply_update() -> Result<UpdateApplyResult, String> {
-        tokio::task::spawn_blocking(cmd_apply_update)
+    pub async fn apply_update(channel: Option<String>) -> Result<UpdateApplyResult, String> {
+        tokio::task::spawn_blocking(move || cmd_apply_update(channel))
             .await
             .map_err(|e| format!("Falha ao aplicar atualização: {e}"))?
     }

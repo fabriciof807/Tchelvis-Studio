@@ -16,6 +16,7 @@ import {
   type PiToolCall,
   type PreviewStatus,
   type RecentWorkspace,
+  type UpdateChannel,
   type WorkspaceInfo,
 } from '../types/ipc';
 
@@ -66,9 +67,11 @@ interface WorkspaceState {
   previewStatus: PreviewStatus | null;
   previewLightboxOpen: boolean;
 
-  // UI Language
+  // UI Language & Update Channel
   locale: Locale;
   setLocale: (locale: Locale) => void;
+  updateChannel: UpdateChannel;
+  setUpdateChannel: (channel: UpdateChannel) => void;
 
   // Chat
   chatMessages: ChatMessage[];
@@ -123,6 +126,20 @@ interface WorkspaceState {
   setPreviewLightboxOpen: (open: boolean) => void;
 }
 
+const UPDATE_CHANNEL_KEY = 'game-hub:update-channel';
+
+function getInitialUpdateChannel(): UpdateChannel {
+  if (typeof window !== 'undefined') {
+    try {
+      const saved = window.localStorage.getItem(UPDATE_CHANNEL_KEY);
+      if (saved === 'nightly' || saved === 'stable') return saved;
+    } catch {
+      // ignore storage errors
+    }
+  }
+  return 'stable';
+}
+
 function computeZenMode(left: boolean, right: boolean, bottom: boolean): boolean {
   return left && right && bottom;
 }
@@ -159,6 +176,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       // ignore storage errors
     }
     set({ locale });
+  },
+  updateChannel: getInitialUpdateChannel(),
+  setUpdateChannel: (updateChannel) => {
+    try {
+      window.localStorage.setItem(UPDATE_CHANNEL_KEY, updateChannel);
+    } catch {
+      // ignore storage errors
+    }
+    set({ updateChannel });
   },
 
   chatMessages: [],

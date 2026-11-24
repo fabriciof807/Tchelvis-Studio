@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { ipc, type UpdateApplyResult, type UpdateCheckResult } from '../types/ipc';
+import {
+  ipc,
+  type UpdateApplyResult,
+  type UpdateChannel,
+  type UpdateCheckResult,
+} from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
 import { LOCALE_OPTIONS, type Locale } from '../i18n';
 import { useI18n } from '../i18n/useI18n';
@@ -22,6 +27,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   const { locale, setLocale, t } = useI18n();
   const incrementModalCount = useWorkspaceStore((s) => s.incrementModalCount);
   const decrementModalCount = useWorkspaceStore((s) => s.decrementModalCount);
+  const updateChannel = useWorkspaceStore((s) => s.updateChannel);
+  const setUpdateChannel = useWorkspaceStore((s) => s.setUpdateChannel);
 
   const [checking, setChecking] = useState(false);
   const [updating, setUpdating] = useState(false);
@@ -46,12 +53,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
 
   if (!open) return null;
 
+  const handleSelectChannel = (channel: UpdateChannel) => {
+    setUpdateChannel(channel);
+    setCheckResult(null);
+    setApplyResult(null);
+    setError(null);
+  };
+
   const handleCheckUpdates = async () => {
     setChecking(true);
     setError(null);
     setApplyResult(null);
     try {
-      const res = await ipc.checkForUpdates();
+      const res = await ipc.checkForUpdates(updateChannel);
       setCheckResult(res);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -64,10 +78,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
     setUpdating(true);
     setError(null);
     try {
-      const res = await ipc.applyUpdate();
+      const res = await ipc.applyUpdate(updateChannel);
       setApplyResult(res);
       if (res.updated) {
-        const refreshed = await ipc.checkForUpdates().catch(() => null);
+        const refreshed = await ipc.checkForUpdates(updateChannel).catch(() => null);
         if (refreshed) setCheckResult(refreshed);
       }
     } catch (err) {
@@ -135,6 +149,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
                 <h3>{t('settings.updatesTitle')}</h3>
                 <p className="muted-text">{t('settings.updatesDesc')}</p>
               </div>
+
+              <div className="channel-selector-block">
+                <div className="channel-selector-row">
+                  <span className="muted-text">{t('settings.channelLabel')}</span>
+                  <div className="segmented-control">
+                    <button
+                      type="button"
+                      className={updateChannel === 'stable' ? 'seg-btn active' : 'seg-btn'}
+                      onClick={() => handleSelectChannel('stable')}
+                      disabled={checking || updating}
+                    >
+                      {t('settings.channelStable')}
+                    </button>
+                    <button
+                      type="button"
+                      className={updateChannel === 'nightly' ? 'seg-btn active' : 'seg-btn'}
+                      onClick={() => handleSelectChannel('nightly')}
+                      disabled={checking || updating}
+                    >
+                      {t('settings.channelNightly')}
+                    </button>
+                  </div>
+                </div>
+                <p className="muted-text">
+                  {updateChannel === 'stable'
+                    ? t('settings.channelStableDesc')
+                    : t('settings.channelNightlyDesc')}
+                </p>
+              </div>
+
               <div className="settings-actions-row">
                 <button
                   type="button"
@@ -171,6 +215,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
             {checkResult && (
               <div className="update-status-card">
                 <div className="update-meta-grid">
+                  <span className="sandbox-badge">
+                    {checkResult.channel.toUpperCase()} ·{' '}
+                    {checkResult.source === 'github-release'
+                      ? t('settings.sourceRelease')
+                      : t('settings.sourceGit')}
+                  </span>
+                  {checkResult.release_tag && (
+                    <div>
+                      <span className="muted-text">Tag:</span>{' '}
+                      <code>{checkResult.release_tag}</code>
+                    </div>
+                  )}
                   <div>
                     <span className="muted-text">{t('settings.branch')}</span>{' '}
                     <code>{checkResult.branch}</code>

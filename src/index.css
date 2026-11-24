@@ -1279,6 +1279,19 @@ button:disabled {
   font-weight: 600;
 }
 
+.channel-selector-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.channel-selector-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 /* Media Viewer (Image + 3D Model) */
 .media-image-stage {
   flex: 1;

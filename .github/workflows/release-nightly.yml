@@ -1,0 +1,130 @@
+name: Release Nightly
+
+on:
+  push:
+    branches: [master, nightly]
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  nightly-release:
+    name: Build & Publish Nightly (Bleeding Edge)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Tauri 2 system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libdbus-1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            patchelf \
+            build-essential \
+            libssl-dev \
+            pkg-config
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-
+            ${{ runner.os }}-cargo-
+
+      - name: Run frontend tests & build
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Tauri desktop release (nightly)
+        env:
+          GAME_HUB_CHANNEL: nightly
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --features desktop,custom-protocol
+
+      - name: Package nightly artifact
+        id: pkg
+        run: |
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -p dist-pkg/defaults
+          cp src-tauri/target/release/game-hub dist-pkg/game-hub
+          chmod +x dist-pkg/game-hub
+          cp -r defaults/. dist-pkg/defaults/
+          cp install.sh dist-pkg/install.sh
+
+          cat > dist-pkg/manifest.json <<EOF
+          {
+            "channel": "nightly",
+            "tag": "nightly",
+            "commit": "${SHORT_SHA}",
+            "published_at": "${PUBLISHED_AT}"
+          }
+          EOF
+
+          tar -C dist-pkg -czf game-hub-linux-x86_64.tar.gz .
+          sha256sum game-hub-linux-x86_64.tar.gz > SHA256SUMS.txt
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "published_at=${PUBLISHED_AT}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync nightly branch to tested HEAD
+        if: github.ref == 'refs/heads/master'
+        run: |
+          git push origin HEAD:refs/heads/nightly --force
+
+      - name: Publish rolling nightly pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES=$(cat <<EOF
+          Nightly bleeding-edge build from \`${{ steps.pkg.outputs.short_sha }}\` (${{ steps.pkg.outputs.published_at }}).
+
+          Recent commits:
+          $(git log -n 10 --oneline)
+          EOF
+          )
+          gh release delete nightly --yes || true
+          git push origin :refs/tags/nightly || true
+          git tag -f nightly HEAD
+          git push origin refs/tags/nightly --force
+          gh release create nightly \
+            game-hub-linux-x86_64.tar.gz \
+            SHA256SUMS.txt \
+            dist-pkg/manifest.json \
+            --title "Nightly (${{ steps.pkg.outputs.short_sha }})" \
+            --notes "$NOTES" \
+            --prerelease \
+            --target "${{ github.sha }}"

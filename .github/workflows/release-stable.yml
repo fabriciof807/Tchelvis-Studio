@@ -1,0 +1,144 @@
+name: Release Stable
+
+on:
+  push:
+    branches: [stable]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Optional version tag (e.g. v0.4.1). Leave empty to auto-generate."
+        required: false
+        default: ""
+      promote_ref:
+        description: "Git ref to test and promote to stable (default: master)"
+        required: false
+        default: "master"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stable-release:
+    name: Verify & Publish Stable Release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.promote_ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Install Tauri 2 system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libdbus-1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            patchelf \
+            build-essential \
+            libssl-dev \
+            pkg-config
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-cargo-stable-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-stable-
+            ${{ runner.os }}-cargo-
+
+      - name: Run full verification suite
+        run: |
+          npm ci
+          npm test
+          npm run build
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Tauri desktop release (stable)
+        env:
+          GAME_HUB_CHANNEL: stable
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --features desktop,custom-protocol
+
+      - name: Package stable artifact
+        id: pkg
+        run: |
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ -n "${{ github.event.inputs.version_tag }}" ]; then
+            TAG="${{ github.event.inputs.version_tag }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            PKG_VER=$(node -p "require('./package.json').version")
+            TAG="v${PKG_VER}-${SHORT_SHA}"
+          fi
+
+          mkdir -p dist-pkg/defaults
+          cp src-tauri/target/release/game-hub dist-pkg/game-hub
+          chmod +x dist-pkg/game-hub
+          cp -r defaults/. dist-pkg/defaults/
+          cp install.sh dist-pkg/install.sh
+
+          cat > dist-pkg/manifest.json <<EOF
+          {
+            "channel": "stable",
+            "tag": "${TAG}",
+            "commit": "${SHORT_SHA}",
+            "published_at": "${PUBLISHED_AT}"
+          }
+          EOF
+
+          tar -C dist-pkg -czf game-hub-linux-x86_64.tar.gz .
+          sha256sum game-hub-linux-x86_64.tar.gz > SHA256SUMS.txt
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "published_at=${PUBLISHED_AT}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync stable branch
+        run: |
+          git push origin HEAD:refs/heads/stable --force
+
+      - name: Create Stable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.pkg.outputs.tag }}"
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag "$TAG" HEAD
+            git push origin "refs/tags/${TAG}"
+          fi
+
+          NOTES=$(cat <<EOF
+          Stable verified release \`${TAG}\` (commit \`${{ steps.pkg.outputs.short_sha }}\`, ${{ steps.pkg.outputs.published_at }}).
+          EOF
+          )
+          gh release create "$TAG" \
+            game-hub-linux-x86_64.tar.gz \
+            SHA256SUMS.txt \
+            dist-pkg/manifest.json \
+            --title "Game Dev Hub ${TAG} (Stable)" \
+            --notes "$NOTES" \
+            --latest
