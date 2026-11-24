@@ -2,12 +2,142 @@ use crate::types::{UpdateApplyResult, UpdateCheckResult};
 use crate::workspace::config_dir;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const DEFAULT_REPO: &str = "fabriciof807/Tchelvis-Studio";
 const PREBUILT_ASSET_NAME: &str = "game-hub-linux-x86_64.tar.gz";
+const UPDATE_CHECK_STEP_TIMEOUT: Duration = Duration::from_secs(15);
+const UPDATE_CHECK_TOTAL_TIMEOUT: Duration = Duration::from_secs(25);
+const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+
+static ACTIVE_CHECK_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+
+/// Signals any in-flight `check_for_updates` operation to abort immediately.
+pub fn cancel_update_check() {
+    if let Ok(guard) = ACTIVE_CHECK_CANCEL.lock() {
+        if let Some(flag) = guard.as_ref() {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+struct CheckContext {
+    cancel: Arc<AtomicBool>,
+    deadline: Instant,
+}
+
+impl CheckContext {
+    fn start(total_timeout: Duration) -> Self {
+        let flag = Arc::new(AtomicBool::new(false));
+        if let Ok(mut guard) = ACTIVE_CHECK_CANCEL.lock() {
+            if let Some(prev) = guard.replace(Arc::clone(&flag)) {
+                prev.store(true, Ordering::SeqCst);
+            }
+        }
+        Self {
+            cancel: flag,
+            deadline: Instant::now() + total_timeout,
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    fn remaining_timeout(&self, max_step: Duration) -> Result<Duration, String> {
+        if self.is_cancelled() {
+            return Err("Busca de atualizações cancelada pelo usuário.".to_string());
+        }
+        let now = Instant::now();
+        if now >= self.deadline {
+            return Err(
+                "Tempo limite esgotado ao buscar atualizações. Verifique sua conexão.".to_string(),
+            );
+        }
+        Ok((self.deadline - now).min(max_step))
+    }
+}
+
+fn run_command_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+    label: &str,
+) -> Result<Output, String> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Falha ao executar {label}: {e}"))?;
+
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut pipe) = stdout_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut pipe) = stderr_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = stdout_handle.join().unwrap_or_default();
+                let stderr = stderr_handle.join().unwrap_or_default();
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => {
+                if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err("Busca de atualizações cancelada pelo usuário.".to_string());
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err(format!(
+                        "Tempo limite esgotado ({}s) ao executar {label}.",
+                        timeout.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!("Falha ao aguardar {label}: {e}"));
+            }
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct InstallState {
@@ -138,13 +268,30 @@ pub fn resolve_install_repo_dir() -> Result<PathBuf, String> {
     Err("Repositório de instalação não encontrado (verifique GAME_HUB_DIR ou ~/.local/share/game-hub).".to_string())
 }
 
-fn run_git(repo_dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
+fn run_git_with_ctx(
+    repo_dir: &Path,
+    args: &[&str],
+    ctx: Option<&CheckContext>,
+) -> Result<String, String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(repo_dir)
         .args(args)
-        .output()
-        .map_err(|e| format!("Falha ao executar git {}: {e}", args.join(" ")))?;
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never");
+
+    let output = if let Some(c) = ctx {
+        let timeout = c.remaining_timeout(UPDATE_CHECK_STEP_TIMEOUT)?;
+        run_command_with_timeout(
+            cmd,
+            timeout,
+            Some(c.cancel.as_ref()),
+            &format!("git {}", args.first().copied().unwrap_or("")),
+        )?
+    } else {
+        cmd.output()
+            .map_err(|e| format!("Falha ao executar git {}: {e}", args.join(" ")))?
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -154,6 +301,10 @@ fn run_git(repo_dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn run_git(repo_dir: &Path, args: &[&str]) -> Result<String, String> {
+    run_git_with_ctx(repo_dir, args, None)
 }
 
 fn detect_local_commit(repo_dir: Option<&Path>) -> String {
@@ -177,7 +328,11 @@ fn detect_local_commit(repo_dir: Option<&Path>) -> String {
     "unknown".to_string()
 }
 
-fn detect_branch_for_channel(repo_dir: &Path, channel: &str) -> String {
+fn detect_branch_for_channel_with_ctx(
+    repo_dir: &Path,
+    channel: &str,
+    ctx: Option<&CheckContext>,
+) -> Result<String, String> {
     let preferred = if channel == "nightly" {
         ["nightly", "master"]
     } else {
@@ -185,21 +340,46 @@ fn detect_branch_for_channel(repo_dir: &Path, channel: &str) -> String {
     };
 
     for branch in preferred {
-        if run_git(repo_dir, &["ls-remote", "--exit-code", "--heads", "origin", branch]).is_ok() {
-            return branch.to_string();
+        match run_git_with_ctx(
+            repo_dir,
+            &["ls-remote", "--exit-code", "--heads", "origin", branch],
+            ctx,
+        ) {
+            Ok(_) => return Ok(branch.to_string()),
+            Err(_) if ctx.is_some_and(CheckContext::is_cancelled) => {
+                return Err("Busca de atualizações cancelada pelo usuário.".to_string());
+            }
+            Err(e) if e.contains("Tempo limite esgotado") => return Err(e),
+            Err(_) => {}
         }
     }
 
     match run_git(repo_dir, &["rev-parse", "--abbrev-ref", "HEAD"]) {
-        Ok(branch) if !branch.is_empty() && branch != "HEAD" => branch,
-        _ => "master".to_string(),
+        Ok(branch) if !branch.is_empty() && branch != "HEAD" => Ok(branch),
+        _ => Ok("master".to_string()),
     }
 }
 
-fn curl_get_bytes(url: &str) -> Option<Vec<u8>> {
+fn detect_branch_for_channel(repo_dir: &Path, channel: &str) -> String {
+    detect_branch_for_channel_with_ctx(repo_dir, channel, None)
+        .unwrap_or_else(|_| "master".to_string())
+}
+
+fn curl_get_bytes(url: &str, ctx: Option<&CheckContext>) -> Result<Option<Vec<u8>>, String> {
+    let timeout = match ctx {
+        Some(c) => c.remaining_timeout(UPDATE_CHECK_STEP_TIMEOUT)?,
+        None => UPDATE_DOWNLOAD_TIMEOUT,
+    };
+    let max_secs = timeout.as_secs().max(1).to_string();
+    let connect_secs = timeout.as_secs().min(8).max(1).to_string();
+
     let mut cmd = Command::new("curl");
     cmd.args([
         "-fsSL",
+        "--connect-timeout",
+        &connect_secs,
+        "--max-time",
+        &max_secs,
         "-H",
         "Accept: application/vnd.github+json",
         "-H",
@@ -211,13 +391,25 @@ fn curl_get_bytes(url: &str) -> Option<Vec<u8>> {
             cmd.args(["-H", &format!("Authorization: Bearer {trimmed}")]);
         }
     }
-    let out = cmd.arg(url).output().ok()?;
-    out.status.success().then_some(out.stdout)
+    cmd.arg(url);
+
+    let out = run_command_with_timeout(
+        cmd,
+        timeout,
+        ctx.map(|c| c.cancel.as_ref()),
+        "curl",
+    )?;
+    Ok(out.status.success().then_some(out.stdout))
 }
 
-fn fetch_github_compare_changelog(repo: &str, base: &str, head: &str) -> Vec<String> {
+fn fetch_github_compare_changelog(
+    repo: &str,
+    base: &str,
+    head: &str,
+    ctx: Option<&CheckContext>,
+) -> Result<Vec<String>, String> {
     let api_url = format!("https://api.github.com/repos/{repo}/compare/{base}...{head}");
-    if let Some(bytes) = curl_get_bytes(&api_url) {
+    if let Some(bytes) = curl_get_bytes(&api_url, ctx)? {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             if let Some(commits) = json.get("commits").and_then(|v| v.as_array()) {
                 let list: Vec<String> = commits
@@ -239,70 +431,106 @@ fn fetch_github_compare_changelog(repo: &str, base: &str, head: &str) -> Vec<Str
                     })
                     .collect();
                 if !list.is_empty() {
-                    return list;
+                    return Ok(list);
                 }
             }
         }
     }
 
+    let timeout = match ctx {
+        Some(c) => c.remaining_timeout(UPDATE_CHECK_STEP_TIMEOUT)?,
+        None => UPDATE_CHECK_STEP_TIMEOUT,
+    };
     let endpoint = format!("repos/{repo}/compare/{base}...{head}");
-    let out = Command::new("gh")
-        .args([
-            "api",
-            &endpoint,
-            "--jq",
-            r#".commits[-25:][] | "\(.sha[0:7]) \(.commit.message | split("\n")[0])""#,
-        ])
-        .output();
+    let mut cmd = Command::new("gh");
+    cmd.args([
+        "api",
+        &endpoint,
+        "--jq",
+        r#".commits[-25:][] | "\(.sha[0:7]) \(.commit.message | split("\n")[0])""#,
+    ]);
 
-    let Ok(output) = out else {
-        return Vec::new();
+    let Ok(output) = run_command_with_timeout(cmd, timeout, ctx.map(|c| c.cancel.as_ref()), "gh api")
+    else {
+        if ctx.is_some_and(CheckContext::is_cancelled) {
+            return Err("Busca de atualizações cancelada pelo usuário.".to_string());
+        }
+        return Ok(Vec::new());
     };
     if !output.status.success() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    String::from_utf8_lossy(&output.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(ToString::to_string)
-        .collect()
+        .collect())
 }
 
-fn fetch_release_for_channel_public_api(repo: &str, channel: &str) -> Option<PublicApiRelease> {
+fn fetch_release_for_channel_public_api(
+    repo: &str,
+    channel: &str,
+    ctx: Option<&CheckContext>,
+) -> Result<Option<PublicApiRelease>, String> {
     let url = format!("https://api.github.com/repos/{repo}/releases?per_page=15");
-    let bytes = curl_get_bytes(&url)?;
-    let releases: Vec<PublicApiRelease> = serde_json::from_slice(&bytes).ok()?;
-    if channel == "nightly" {
+    let Some(bytes) = curl_get_bytes(&url, ctx)? else {
+        return Ok(None);
+    };
+    let Ok(releases) = serde_json::from_slice::<Vec<PublicApiRelease>>(&bytes) else {
+        return Ok(None);
+    };
+    let found = if channel == "nightly" {
         releases
             .into_iter()
             .find(|r| !r.draft && (r.tag_name == "nightly" || r.prerelease))
     } else {
         releases.into_iter().find(|r| !r.draft && !r.prerelease)
-    }
+    };
+    Ok(found)
 }
 
-fn fetch_release_for_channel_gh(repo: &str, channel: &str) -> Option<PublicApiRelease> {
-    let list_out = Command::new("gh")
-        .args([
-            "release",
-            "list",
-            "--repo",
-            repo,
-            "--limit",
-            "15",
-            "--json",
-            "tagName,isPrerelease,isDraft",
-        ])
-        .output()
-        .ok()?;
+fn fetch_release_for_channel_gh(
+    repo: &str,
+    channel: &str,
+    ctx: Option<&CheckContext>,
+) -> Result<Option<PublicApiRelease>, String> {
+    let timeout = match ctx {
+        Some(c) => c.remaining_timeout(UPDATE_CHECK_STEP_TIMEOUT)?,
+        None => UPDATE_CHECK_STEP_TIMEOUT,
+    };
+    let mut list_cmd = Command::new("gh");
+    list_cmd.args([
+        "release",
+        "list",
+        "--repo",
+        repo,
+        "--limit",
+        "15",
+        "--json",
+        "tagName,isPrerelease,isDraft",
+    ]);
+    let list_out = match run_command_with_timeout(
+        list_cmd,
+        timeout,
+        ctx.map(|c| c.cancel.as_ref()),
+        "gh release list",
+    ) {
+        Ok(o) => o,
+        Err(e) if ctx.is_some_and(CheckContext::is_cancelled) || e.contains("Tempo limite") => {
+            return Err(e)
+        }
+        Err(_) => return Ok(None),
+    };
     if !list_out.status.success() {
-        return None;
+        return Ok(None);
     }
 
-    let releases: Vec<GhReleaseListItem> = serde_json::from_slice(&list_out.stdout).ok()?;
-    let selected = if channel == "nightly" {
+    let Ok(releases) = serde_json::from_slice::<Vec<GhReleaseListItem>>(&list_out.stdout) else {
+        return Ok(None);
+    };
+    let Some(selected) = (if channel == "nightly" {
         releases
             .into_iter()
             .find(|r| !r.is_draft && (r.tag_name == "nightly" || r.is_prerelease))
@@ -310,26 +538,44 @@ fn fetch_release_for_channel_gh(repo: &str, channel: &str) -> Option<PublicApiRe
         releases
             .into_iter()
             .find(|r| !r.is_draft && !r.is_prerelease)
-    }?;
+    }) else {
+        return Ok(None);
+    };
 
-    let view_out = Command::new("gh")
-        .args([
-            "release",
-            "view",
-            &selected.tag_name,
-            "--repo",
-            repo,
-            "--json",
-            "tagName,targetCommitish,body,assets",
-        ])
-        .output()
-        .ok()?;
+    let timeout = match ctx {
+        Some(c) => c.remaining_timeout(UPDATE_CHECK_STEP_TIMEOUT)?,
+        None => UPDATE_CHECK_STEP_TIMEOUT,
+    };
+    let mut view_cmd = Command::new("gh");
+    view_cmd.args([
+        "release",
+        "view",
+        &selected.tag_name,
+        "--repo",
+        repo,
+        "--json",
+        "tagName,targetCommitish,body,assets",
+    ]);
+    let view_out = match run_command_with_timeout(
+        view_cmd,
+        timeout,
+        ctx.map(|c| c.cancel.as_ref()),
+        "gh release view",
+    ) {
+        Ok(o) => o,
+        Err(e) if ctx.is_some_and(CheckContext::is_cancelled) || e.contains("Tempo limite") => {
+            return Err(e)
+        }
+        Err(_) => return Ok(None),
+    };
     if !view_out.status.success() {
-        return None;
+        return Ok(None);
     }
 
-    let view: GhReleaseView = serde_json::from_slice(&view_out.stdout).ok()?;
-    Some(PublicApiRelease {
+    let Ok(view) = serde_json::from_slice::<GhReleaseView>(&view_out.stdout) else {
+        return Ok(None);
+    };
+    Ok(Some(PublicApiRelease {
         tag_name: view.tag_name,
         prerelease: selected.is_prerelease,
         draft: selected.is_draft,
@@ -343,7 +589,7 @@ fn fetch_release_for_channel_gh(repo: &str, channel: &str) -> Option<PublicApiRe
                 browser_download_url: a.url.unwrap_or_default(),
             })
             .collect(),
-    })
+    }))
 }
 
 fn download_release_asset(
@@ -352,10 +598,11 @@ fn download_release_asset(
     asset_name: &str,
     browser_url: Option<&str>,
     dst_dir: &Path,
+    ctx: Option<&CheckContext>,
 ) -> Result<(), String> {
     let dst_file = dst_dir.join(asset_name);
     if let Some(url) = browser_url.filter(|u| !u.is_empty()) {
-        if let Some(bytes) = curl_get_bytes(url) {
+        if let Some(bytes) = curl_get_bytes(url, ctx)? {
             fs::write(&dst_file, &bytes)
                 .map_err(|e| format!("Falha ao gravar {asset_name}: {e}"))?;
             return Ok(());
@@ -363,26 +610,34 @@ fn download_release_asset(
     }
 
     let fallback_url = format!("https://github.com/{repo}/releases/download/{tag}/{asset_name}");
-    if let Some(bytes) = curl_get_bytes(&fallback_url) {
+    if let Some(bytes) = curl_get_bytes(&fallback_url, ctx)? {
         fs::write(&dst_file, &bytes)
             .map_err(|e| format!("Falha ao gravar {asset_name}: {e}"))?;
         return Ok(());
     }
 
-    let dl = Command::new("gh")
-        .args([
-            "release",
-            "download",
-            tag,
-            "--repo",
-            repo,
-            "-p",
-            asset_name,
-            "-D",
-            dst_dir.to_str().unwrap_or("/tmp"),
-        ])
-        .output()
-        .map_err(|e| format!("Falha ao baixar {asset_name}: {e}"))?;
+    let timeout = match ctx {
+        Some(c) => c.remaining_timeout(UPDATE_CHECK_STEP_TIMEOUT)?,
+        None => UPDATE_DOWNLOAD_TIMEOUT,
+    };
+    let mut cmd = Command::new("gh");
+    cmd.args([
+        "release",
+        "download",
+        tag,
+        "--repo",
+        repo,
+        "-p",
+        asset_name,
+        "-D",
+        dst_dir.to_str().unwrap_or("/tmp"),
+    ]);
+    let dl = run_command_with_timeout(
+        cmd,
+        timeout,
+        ctx.map(|c| c.cancel.as_ref()),
+        "gh release download",
+    )?;
     if !dl.status.success() {
         return Err(format!(
             "Download de {asset_name} falhou: {}",
@@ -392,10 +647,19 @@ fn download_release_asset(
     Ok(())
 }
 
-fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Option<UpdateCheckResult> {
+fn check_github_release_channel(
+    channel: &str,
+    repo_dir: Option<&Path>,
+    ctx: Option<&CheckContext>,
+) -> Result<Option<UpdateCheckResult>, String> {
     let repo = repo_slug();
-    let view = fetch_release_for_channel_public_api(&repo, channel)
-        .or_else(|| fetch_release_for_channel_gh(&repo, channel))?;
+    let view = match fetch_release_for_channel_public_api(&repo, channel, ctx)? {
+        Some(v) => v,
+        None => match fetch_release_for_channel_gh(&repo, channel, ctx)? {
+            Some(v) => v,
+            None => return Ok(None),
+        },
+    };
 
     let has_prebuilt_asset = view.assets.iter().any(|a| a.name == PREBUILT_ASSET_NAME);
     let manifest_asset = view.assets.iter().find(|a| a.name == "manifest.json");
@@ -403,20 +667,25 @@ fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Optio
     let mut manifest_commit: Option<String> = None;
     if let Some(m_asset) = manifest_asset {
         if let Ok(tmp) = tempfile::tempdir() {
-            if download_release_asset(
+            match download_release_asset(
                 &repo,
                 &view.tag_name,
                 "manifest.json",
                 Some(&m_asset.browser_download_url),
                 tmp.path(),
-            )
-            .is_ok()
-            {
-                if let Ok(raw) = fs::read_to_string(tmp.path().join("manifest.json")) {
-                    if let Ok(parsed) = serde_json::from_str::<ReleaseManifest>(&raw) {
-                        manifest_commit = parsed.commit.or(parsed.tag);
+                ctx,
+            ) {
+                Ok(()) => {
+                    if let Ok(raw) = fs::read_to_string(tmp.path().join("manifest.json")) {
+                        if let Ok(parsed) = serde_json::from_str::<ReleaseManifest>(&raw) {
+                            manifest_commit = parsed.commit.or(parsed.tag);
+                        }
                     }
                 }
+                Err(e) if ctx.is_some_and(CheckContext::is_cancelled) || e.contains("Tempo limite") => {
+                    return Err(e);
+                }
+                Err(_) => {}
             }
         }
     }
@@ -449,27 +718,45 @@ fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Optio
 
     if update_available {
         if let Some(dir) = repo_dir {
-            if run_git(dir, &["fetch", "origin", "--tags"]).is_ok() && current_commit != "unknown" {
-                let range = format!("{current_commit}..{remote_commit}");
-                if let Ok(count_str) = run_git(dir, &["rev-list", "--count", &range]) {
-                    if let Ok(n) = count_str.parse::<u32>() {
-                        commits_behind = n.max(1);
+            match run_git_with_ctx(dir, &["fetch", "origin", "--tags"], ctx) {
+                Ok(_) if current_commit != "unknown" => {
+                    let range = format!("{current_commit}..{remote_commit}");
+                    if let Ok(count_str) = run_git(dir, &["rev-list", "--count", &range]) {
+                        if let Ok(n) = count_str.parse::<u32>() {
+                            commits_behind = n.max(1);
+                        }
+                    }
+                    if let Ok(log_out) =
+                        run_git(dir, &["log", "--no-merges", "--oneline", "-n", "20", &range])
+                    {
+                        changelog = log_out
+                            .lines()
+                            .map(str::trim)
+                            .filter(|l| !l.is_empty())
+                            .map(ToString::to_string)
+                            .collect();
                     }
                 }
-                if let Ok(log_out) = run_git(dir, &["log", "--no-merges", "--oneline", "-n", "20", &range]) {
-                    changelog = log_out
-                        .lines()
-                        .map(str::trim)
-                        .filter(|l| !l.is_empty())
-                        .map(ToString::to_string)
-                        .collect();
+                Err(e) if ctx.is_some_and(CheckContext::is_cancelled) || e.contains("Tempo limite") => {
+                    return Err(e);
                 }
+                _ => {}
             }
         }
     }
 
-    if changelog.is_empty() && update_available && current_commit != "unknown" && current_commit != remote_commit {
-        changelog = fetch_github_compare_changelog(&repo, &current_commit, &remote_commit);
+    if changelog.is_empty()
+        && update_available
+        && current_commit != "unknown"
+        && current_commit != remote_commit
+    {
+        match fetch_github_compare_changelog(&repo, &current_commit, &remote_commit, ctx) {
+            Ok(list) => changelog = list,
+            Err(e) if ctx.is_some_and(CheckContext::is_cancelled) || e.contains("Tempo limite") => {
+                return Err(e);
+            }
+            Err(_) => {}
+        }
     }
 
     if changelog.is_empty() && update_available {
@@ -484,7 +771,7 @@ fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Optio
         }
     }
 
-    Some(UpdateCheckResult {
+    Ok(Some(UpdateCheckResult {
         channel: channel.to_string(),
         source: "github-release".to_string(),
         repo_dir: repo_dir
@@ -498,7 +785,7 @@ fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Optio
         update_available,
         has_prebuilt_asset,
         changelog,
-    })
+    }))
 }
 
 /// Fetches `origin/<channel-branch>` and checks whether the local clone is behind.
@@ -506,9 +793,17 @@ pub fn check_for_updates_in_dir(
     repo_dir: &Path,
     channel: &str,
 ) -> Result<UpdateCheckResult, String> {
+    check_for_updates_in_dir_with_ctx(repo_dir, channel, None)
+}
+
+fn check_for_updates_in_dir_with_ctx(
+    repo_dir: &Path,
+    channel: &str,
+    ctx: Option<&CheckContext>,
+) -> Result<UpdateCheckResult, String> {
     let channel = normalize_channel(Some(channel));
-    let branch = detect_branch_for_channel(repo_dir, channel);
-    run_git(repo_dir, &["fetch", "origin", &branch])?;
+    let branch = detect_branch_for_channel_with_ctx(repo_dir, channel, ctx)?;
+    run_git_with_ctx(repo_dir, &["fetch", "origin", &branch], ctx)?;
 
     let remote_ref = format!("origin/{branch}");
     let current_commit = run_git(repo_dir, &["rev-parse", "--short", "HEAD"])?;
@@ -588,10 +883,10 @@ fn apply_github_release_update(check: &UpdateCheckResult) -> Result<UpdateApplyR
     let repo = repo_slug();
     let tmp = tempfile::tempdir().map_err(|e| format!("Falha ao criar pasta temporária: {e}"))?;
     let mut log = format!("$ download {repo}@{tag}/{PREBUILT_ASSET_NAME}\n");
-    download_release_asset(&repo, tag, PREBUILT_ASSET_NAME, None, tmp.path())?;
+    download_release_asset(&repo, tag, PREBUILT_ASSET_NAME, None, tmp.path(), None)?;
 
     // Optional checksum verification if SHA256SUMS.txt is attached
-    if download_release_asset(&repo, tag, "SHA256SUMS.txt", None, tmp.path()).is_ok()
+    if download_release_asset(&repo, tag, "SHA256SUMS.txt", None, tmp.path(), None).is_ok()
         && tmp.path().join("SHA256SUMS.txt").exists()
     {
         let verify = Command::new("sha256sum")
@@ -787,23 +1082,26 @@ pub fn apply_update_in_dir(repo_dir: &Path, channel: &str) -> Result<UpdateApply
 
 pub fn check_for_updates(channel: Option<&str>) -> Result<UpdateCheckResult, String> {
     let channel = normalize_channel(channel);
+    let ctx = CheckContext::start(UPDATE_CHECK_TOTAL_TIMEOUT);
     let repo_dir = resolve_install_repo_dir().ok();
 
-    if let Some(release_check) = check_github_release_channel(channel, repo_dir.as_deref()) {
+    if let Some(release_check) =
+        check_github_release_channel(channel, repo_dir.as_deref(), Some(&ctx))?
+    {
         return Ok(release_check);
     }
 
     let dir = repo_dir.ok_or_else(|| {
         "Nenhuma release encontrada no GitHub e repositório local não encontrado (~/.local/share/game-hub).".to_string()
     })?;
-    check_for_updates_in_dir(&dir, channel)
+    check_for_updates_in_dir_with_ctx(&dir, channel, Some(&ctx))
 }
 
 pub fn apply_update(channel: Option<&str>) -> Result<UpdateApplyResult, String> {
     let channel = normalize_channel(channel);
     let repo_dir = resolve_install_repo_dir().ok();
 
-    if let Some(release_check) = check_github_release_channel(channel, repo_dir.as_deref()) {
+    if let Some(release_check) = check_github_release_channel(channel, repo_dir.as_deref(), None)? {
         if release_check.has_prebuilt_asset {
             return apply_github_release_update(&release_check);
         }
@@ -893,5 +1191,35 @@ mod tests {
         assert!(nightly_check.update_available);
         assert_eq!(nightly_check.commits_behind, 1);
         assert!(nightly_check.changelog[0].contains("bleeding edge nightly"));
+    }
+
+    #[test]
+    fn run_command_with_timeout_aborts_stalled_process() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 5"]);
+        let err = run_command_with_timeout(cmd, Duration::from_millis(120), None, "sleep-test")
+            .expect_err("expected timeout error");
+        assert!(err.contains("Tempo limite esgotado"));
+    }
+
+    #[test]
+    fn run_command_with_timeout_cancels_on_signal() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&flag);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 5"]);
+        let err = run_command_with_timeout(
+            cmd,
+            Duration::from_secs(5),
+            Some(flag.as_ref()),
+            "cancel-test",
+        )
+        .expect_err("expected cancellation error");
+        assert!(err.contains("cancelada"));
     }
 }

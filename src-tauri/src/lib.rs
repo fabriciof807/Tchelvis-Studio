@@ -451,6 +451,10 @@ pub fn cmd_check_for_updates(channel: Option<String>) -> Result<UpdateCheckResul
     updater::check_for_updates(channel.as_deref())
 }
 
+pub fn cmd_cancel_update_check() {
+    updater::cancel_update_check();
+}
+
 pub fn cmd_apply_update(channel: Option<String>) -> Result<UpdateApplyResult, String> {
     updater::apply_update(channel.as_deref())
 }
@@ -816,6 +820,11 @@ mod desktop_ipc {
     }
 
     #[tauri::command]
+    pub fn cancel_update_check() {
+        cmd_cancel_update_check();
+    }
+
+    #[tauri::command]
     pub async fn apply_update(channel: Option<String>) -> Result<UpdateApplyResult, String> {
         tokio::task::spawn_blocking(move || cmd_apply_update(channel))
             .await
@@ -1090,6 +1099,7 @@ mod desktop_ipc {
                 git_cleanup_worktree,
                 pick_workspace_directory,
                 check_for_updates,
+                cancel_update_check,
                 apply_update,
                 restart_app,
                 dispatch_flow_generation,

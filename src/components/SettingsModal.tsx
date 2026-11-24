@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ipc,
   type UpdateApplyResult,
@@ -40,6 +40,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   const [checkResult, setCheckResult] = useState<UpdateCheckResult | null>(null);
   const [applyResult, setApplyResult] = useState<UpdateApplyResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const checkRequestIdRef = useRef(0);
+  const checkTimeoutRef = useRef<number | null>(null);
+
+  const clearCheckTimer = () => {
+    if (checkTimeoutRef.current !== null) {
+      window.clearTimeout(checkTimeoutRef.current);
+      checkTimeoutRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      clearCheckTimer();
+      checkRequestIdRef.current += 1;
+      void ipc.cancelUpdateCheck();
+    };
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -59,18 +76,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   if (!open) return null;
 
   const runCheckForChannel = async (channel: UpdateChannel) => {
+    clearCheckTimer();
+    const reqId = ++checkRequestIdRef.current;
     setChecking(true);
     setError(null);
     setApplyResult(null);
     setConfirmingRestart(false);
+
+    const UPDATE_CHECK_TIMEOUT_MS = 30_000;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      checkTimeoutRef.current = window.setTimeout(() => {
+        void ipc.cancelUpdateCheck();
+        reject(new Error(t('settings.checkTimeout')));
+      }, UPDATE_CHECK_TIMEOUT_MS);
+    });
+
     try {
-      const res = await ipc.checkForUpdates(channel);
+      const res = await Promise.race([ipc.checkForUpdates(channel), timeoutPromise]);
+      if (reqId !== checkRequestIdRef.current) return;
       setCheckResult(res);
     } catch (err) {
+      if (reqId !== checkRequestIdRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setChecking(false);
+      clearCheckTimer();
+      if (reqId === checkRequestIdRef.current) {
+        setChecking(false);
+      }
     }
+  };
+
+  const handleCancelCheck = () => {
+    clearCheckTimer();
+    checkRequestIdRef.current += 1;
+    void ipc.cancelUpdateCheck();
+    setChecking(false);
+    setError(t('settings.checkCancelled'));
   };
 
   const handleSelectChannel = (channel: UpdateChannel) => {
@@ -238,6 +279,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
                   <RefreshIcon size={13} className={checking ? 'spin' : undefined} />
                   <span>{checking ? t('settings.checking') : t('settings.checkUpdates')}</span>
                 </button>
+                {checking && (
+                  <button
+                    type="button"
+                    className="btn-ghost-sm inline-icon-btn"
+                    onClick={handleCancelCheck}
+                  >
+                    <CloseIcon size={13} />
+                    <span>{t('settings.cancelCheck')}</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   className="btn-primary-sm inline-icon-btn"

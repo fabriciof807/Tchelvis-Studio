@@ -867,6 +867,12 @@ export const ipc = {
     };
   },
 
+  async cancelUpdateCheck(): Promise<void> {
+    if (isTauriEnv()) {
+      await invoke<void>('cancel_update_check');
+    }
+  },
+
   async applyUpdate(channel: UpdateChannel = 'stable'): Promise<UpdateApplyResult> {
     if (isTauriEnv()) {
       return invoke<UpdateApplyResult>('apply_update', { channel });
