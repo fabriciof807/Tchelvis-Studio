@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const DEFAULT_REPO: &str = "fabriciof807/game-hub";
+const DEFAULT_REPO: &str = "fabriciof807/Tchelvis-Studio";
 const PREBUILT_ASSET_NAME: &str = "game-hub-linux-x86_64.tar.gz";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -14,6 +14,22 @@ pub struct InstallState {
     pub channel: String,
     pub tag: Option<String>,
     pub commit: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct PublicApiAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct PublicApiRelease {
+    tag_name: String,
+    prerelease: bool,
+    draft: bool,
+    target_commitish: Option<String>,
+    body: Option<String>,
+    assets: Vec<PublicApiAsset>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -29,6 +45,7 @@ struct GhReleaseListItem {
 #[derive(Deserialize, Debug, Clone)]
 struct GhReleaseAsset {
     name: String,
+    url: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -179,7 +196,55 @@ fn detect_branch_for_channel(repo_dir: &Path, channel: &str) -> String {
     }
 }
 
+fn curl_get_bytes(url: &str) -> Option<Vec<u8>> {
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "-fsSL",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-H",
+        "User-Agent: Tchelvis-Studio-Updater",
+    ]);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            cmd.args(["-H", &format!("Authorization: Bearer {trimmed}")]);
+        }
+    }
+    let out = cmd.arg(url).output().ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
 fn fetch_github_compare_changelog(repo: &str, base: &str, head: &str) -> Vec<String> {
+    let api_url = format!("https://api.github.com/repos/{repo}/compare/{base}...{head}");
+    if let Some(bytes) = curl_get_bytes(&api_url) {
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Some(commits) = json.get("commits").and_then(|v| v.as_array()) {
+                let list: Vec<String> = commits
+                    .iter()
+                    .rev()
+                    .take(25)
+                    .rev()
+                    .filter_map(|c| {
+                        let sha = c.get("sha")?.as_str()?;
+                        let msg = c
+                            .pointer("/commit/message")?
+                            .as_str()?
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .trim();
+                        let short = &sha[..sha.len().min(7)];
+                        Some(format!("{short} {msg}"))
+                    })
+                    .collect();
+                if !list.is_empty() {
+                    return list;
+                }
+            }
+        }
+    }
+
     let endpoint = format!("repos/{repo}/compare/{base}...{head}");
     let out = Command::new("gh")
         .args([
@@ -205,14 +270,26 @@ fn fetch_github_compare_changelog(repo: &str, base: &str, head: &str) -> Vec<Str
         .collect()
 }
 
-fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Option<UpdateCheckResult> {
-    let repo = repo_slug();
+fn fetch_release_for_channel_public_api(repo: &str, channel: &str) -> Option<PublicApiRelease> {
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=15");
+    let bytes = curl_get_bytes(&url)?;
+    let releases: Vec<PublicApiRelease> = serde_json::from_slice(&bytes).ok()?;
+    if channel == "nightly" {
+        releases
+            .into_iter()
+            .find(|r| !r.draft && (r.tag_name == "nightly" || r.prerelease))
+    } else {
+        releases.into_iter().find(|r| !r.draft && !r.prerelease)
+    }
+}
+
+fn fetch_release_for_channel_gh(repo: &str, channel: &str) -> Option<PublicApiRelease> {
     let list_out = Command::new("gh")
         .args([
             "release",
             "list",
             "--repo",
-            &repo,
+            repo,
             "--limit",
             "15",
             "--json",
@@ -220,7 +297,6 @@ fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Optio
         ])
         .output()
         .ok()?;
-
     if !list_out.status.success() {
         return None;
     }
@@ -242,7 +318,7 @@ fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Optio
             "view",
             &selected.tag_name,
             "--repo",
-            &repo,
+            repo,
             "--json",
             "tagName,targetCommitish,body,assets",
         ])
@@ -253,31 +329,92 @@ fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Optio
     }
 
     let view: GhReleaseView = serde_json::from_slice(&view_out.stdout).ok()?;
+    Some(PublicApiRelease {
+        tag_name: view.tag_name,
+        prerelease: selected.is_prerelease,
+        draft: selected.is_draft,
+        target_commitish: view.target_commitish,
+        body: view.body,
+        assets: view
+            .assets
+            .into_iter()
+            .map(|a| PublicApiAsset {
+                name: a.name,
+                browser_download_url: a.url.unwrap_or_default(),
+            })
+            .collect(),
+    })
+}
+
+fn download_release_asset(
+    repo: &str,
+    tag: &str,
+    asset_name: &str,
+    browser_url: Option<&str>,
+    dst_dir: &Path,
+) -> Result<(), String> {
+    let dst_file = dst_dir.join(asset_name);
+    if let Some(url) = browser_url.filter(|u| !u.is_empty()) {
+        if let Some(bytes) = curl_get_bytes(url) {
+            fs::write(&dst_file, &bytes)
+                .map_err(|e| format!("Falha ao gravar {asset_name}: {e}"))?;
+            return Ok(());
+        }
+    }
+
+    let fallback_url = format!("https://github.com/{repo}/releases/download/{tag}/{asset_name}");
+    if let Some(bytes) = curl_get_bytes(&fallback_url) {
+        fs::write(&dst_file, &bytes)
+            .map_err(|e| format!("Falha ao gravar {asset_name}: {e}"))?;
+        return Ok(());
+    }
+
+    let dl = Command::new("gh")
+        .args([
+            "release",
+            "download",
+            tag,
+            "--repo",
+            repo,
+            "-p",
+            asset_name,
+            "-D",
+            dst_dir.to_str().unwrap_or("/tmp"),
+        ])
+        .output()
+        .map_err(|e| format!("Falha ao baixar {asset_name}: {e}"))?;
+    if !dl.status.success() {
+        return Err(format!(
+            "Download de {asset_name} falhou: {}",
+            String::from_utf8_lossy(&dl.stderr)
+        ));
+    }
+    Ok(())
+}
+
+fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Option<UpdateCheckResult> {
+    let repo = repo_slug();
+    let view = fetch_release_for_channel_public_api(&repo, channel)
+        .or_else(|| fetch_release_for_channel_gh(&repo, channel))?;
+
     let has_prebuilt_asset = view.assets.iter().any(|a| a.name == PREBUILT_ASSET_NAME);
-    let has_manifest = view.assets.iter().any(|a| a.name == "manifest.json");
+    let manifest_asset = view.assets.iter().find(|a| a.name == "manifest.json");
 
     let mut manifest_commit: Option<String> = None;
-    if has_manifest {
+    if let Some(m_asset) = manifest_asset {
         if let Ok(tmp) = tempfile::tempdir() {
-            let dl = Command::new("gh")
-                .args([
-                    "release",
-                    "download",
-                    &view.tag_name,
-                    "--repo",
-                    &repo,
-                    "-p",
-                    "manifest.json",
-                    "-D",
-                    tmp.path().to_str().unwrap_or("/tmp"),
-                ])
-                .output();
-            if let Ok(out) = dl {
-                if out.status.success() {
-                    if let Ok(raw) = fs::read_to_string(tmp.path().join("manifest.json")) {
-                        if let Ok(parsed) = serde_json::from_str::<ReleaseManifest>(&raw) {
-                            manifest_commit = parsed.commit.or(parsed.tag);
-                        }
+            if download_release_asset(
+                &repo,
+                &view.tag_name,
+                "manifest.json",
+                Some(&m_asset.browser_download_url),
+                tmp.path(),
+            )
+            .is_ok()
+            {
+                if let Ok(raw) = fs::read_to_string(tmp.path().join("manifest.json")) {
+                    if let Ok(parsed) = serde_json::from_str::<ReleaseManifest>(&raw) {
+                        manifest_commit = parsed.commit.or(parsed.tag);
                     }
                 }
             }
@@ -450,57 +587,23 @@ fn apply_github_release_update(check: &UpdateCheckResult) -> Result<UpdateApplyR
         .ok_or_else(|| "Tag de release ausente".to_string())?;
     let repo = repo_slug();
     let tmp = tempfile::tempdir().map_err(|e| format!("Falha ao criar pasta temporária: {e}"))?;
-    let tmp_str = tmp.path().to_string_lossy().to_string();
-
-    let mut log = format!("$ gh release download {tag} --repo {repo} -p {PREBUILT_ASSET_NAME}\n");
-    let dl = Command::new("gh")
-        .args([
-            "release",
-            "download",
-            tag,
-            "--repo",
-            &repo,
-            "-p",
-            PREBUILT_ASSET_NAME,
-            "-D",
-            &tmp_str,
-        ])
-        .output()
-        .map_err(|e| format!("Falha ao executar gh release download: {e}"))?;
-
-    log.push_str(&String::from_utf8_lossy(&dl.stdout));
-    log.push_str(&String::from_utf8_lossy(&dl.stderr));
-    if !dl.status.success() {
-        return Err(format!("Download da release falhou:\n{log}"));
-    }
+    let mut log = format!("$ download {repo}@{tag}/{PREBUILT_ASSET_NAME}\n");
+    download_release_asset(&repo, tag, PREBUILT_ASSET_NAME, None, tmp.path())?;
 
     // Optional checksum verification if SHA256SUMS.txt is attached
-    let sum_dl = Command::new("gh")
-        .args([
-            "release",
-            "download",
-            tag,
-            "--repo",
-            &repo,
-            "-p",
-            "SHA256SUMS.txt",
-            "-D",
-            &tmp_str,
-        ])
-        .output();
-    if let Ok(out) = sum_dl {
-        if out.status.success() && tmp.path().join("SHA256SUMS.txt").exists() {
-            let verify = Command::new("sha256sum")
-                .args(["-c", "SHA256SUMS.txt"])
-                .current_dir(tmp.path())
-                .output();
-            if let Ok(v) = verify {
-                log.push_str("\n$ sha256sum -c SHA256SUMS.txt\n");
-                log.push_str(&String::from_utf8_lossy(&v.stdout));
-                log.push_str(&String::from_utf8_lossy(&v.stderr));
-                if !v.status.success() {
-                    return Err(format!("Falha na verificação SHA-256:\n{log}"));
-                }
+    if download_release_asset(&repo, tag, "SHA256SUMS.txt", None, tmp.path()).is_ok()
+        && tmp.path().join("SHA256SUMS.txt").exists()
+    {
+        let verify = Command::new("sha256sum")
+            .args(["-c", "SHA256SUMS.txt"])
+            .current_dir(tmp.path())
+            .output();
+        if let Ok(v) = verify {
+            log.push_str("\n$ sha256sum -c SHA256SUMS.txt\n");
+            log.push_str(&String::from_utf8_lossy(&v.stdout));
+            log.push_str(&String::from_utf8_lossy(&v.stderr));
+            if !v.status.success() {
+                return Err(format!("Falha na verificação SHA-256:\n{log}"));
             }
         }
     }

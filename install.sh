@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${GAME_HUB_REPO:-fabriciof807/game-hub}"
+REPO="${GAME_HUB_REPO:-fabriciof807/Tchelvis-Studio}"
 CHANNEL="${GAME_HUB_CHANNEL:-stable}"
 FROM_SOURCE=0
 INSTALL_DIR="${GAME_HUB_DIR:-$HOME/.local/share/game-hub}"
@@ -134,44 +134,65 @@ try_install_prebuilt_release() {
     if [ "$FROM_SOURCE" -eq 1 ]; then
         return 1
     fi
-    if ! need_cmd gh || ! gh auth status >/dev/null 2>&1; then
-        return 1
-    fi
 
     local tag=""
-    if [ "$CHANNEL" = "nightly" ]; then
-        tag=$(gh release list --repo "$REPO" --limit 15 --json tagName,isPrerelease,isDraft \
-            --jq '.[] | select(.isDraft == false and (.tagName == "nightly" or .isPrerelease == true)) | .tagName' \
-            | head -n 1 || true)
-    else
-        tag=$(gh release list --repo "$REPO" --limit 15 --json tagName,isPrerelease,isDraft \
-            --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName' \
-            | head -n 1 || true)
+    local tmp_dir=""
+
+    if need_cmd gh && gh auth status >/dev/null 2>&1; then
+        if [ "$CHANNEL" = "nightly" ]; then
+            tag=$(gh release list --repo "$REPO" --limit 15 --json tagName,isPrerelease,isDraft \
+                --jq '.[] | select(.isDraft == false and (.tagName == "nightly" or .isPrerelease == true)) | .tagName' \
+                | head -n 1 || true)
+        else
+            tag=$(gh release list --repo "$REPO" --limit 15 --json tagName,isPrerelease,isDraft \
+                --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName' \
+                | head -n 1 || true)
+        fi
+    elif need_cmd curl && need_cmd python3; then
+        local api_json
+        api_json=$(curl -fsSL -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/releases?per_page=15" || true)
+        if [ -n "$api_json" ]; then
+            tag=$(printf '%s' "$api_json" | python3 -c '
+import json, sys
+channel = sys.argv[1]
+releases = json.load(sys.stdin)
+for r in releases:
+    if r.get("draft"): continue
+    has_asset = any(a.get("name") == "game-hub-linux-x86_64.tar.gz" for a in r.get("assets", []))
+    if not has_asset: continue
+    if channel == "nightly" and (r.get("tag_name") == "nightly" or r.get("prerelease")):
+        print(r["tag_name"]); break
+    if channel != "nightly" and not r.get("prerelease"):
+        print(r["tag_name"]); break
+' "$CHANNEL" 2>/dev/null || true)
+        fi
     fi
 
     if [ -z "$tag" ]; then
         return 1
     fi
 
-    local has_asset
-    has_asset=$(gh release view "$tag" --repo "$REPO" --json assets \
-        --jq ".assets[] | select(.name == \"${ASSET_NAME}\") | .name" | head -n 1 || true)
-    if [ -z "$has_asset" ]; then
-        return 1
-    fi
-
     info "Baixando release pré-compilada do CI/CD (${CHANNEL}: ${tag})..."
-    local tmp_dir
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' RETURN
 
-    gh release download "$tag" --repo "$REPO" -p "$ASSET_NAME" -D "$tmp_dir"
-    if gh release download "$tag" --repo "$REPO" -p SHA256SUMS.txt -D "$tmp_dir" >/dev/null 2>&1; then
+    if ! curl -fsSL -L "https://github.com/${REPO}/releases/download/${tag}/${ASSET_NAME}" -o "$tmp_dir/$ASSET_NAME"; then
+        if need_cmd gh && gh auth status >/dev/null 2>&1; then
+            gh release download "$tag" --repo "$REPO" -p "$ASSET_NAME" -D "$tmp_dir"
+        else
+            return 1
+        fi
+    fi
+
+    if curl -fsSL -L "https://github.com/${REPO}/releases/download/${tag}/SHA256SUMS.txt" -o "$tmp_dir/SHA256SUMS.txt" 2>/dev/null \
+        || (need_cmd gh && gh release download "$tag" --repo "$REPO" -p SHA256SUMS.txt -D "$tmp_dir" >/dev/null 2>&1); then
         (cd "$tmp_dir" && sha256sum -c SHA256SUMS.txt)
     fi
 
     local commit=""
-    if gh release download "$tag" --repo "$REPO" -p manifest.json -D "$tmp_dir" >/dev/null 2>&1; then
+    if curl -fsSL -L "https://github.com/${REPO}/releases/download/${tag}/manifest.json" -o "$tmp_dir/manifest.json" 2>/dev/null \
+        || (need_cmd gh && gh release download "$tag" --repo "$REPO" -p manifest.json -D "$tmp_dir" >/dev/null 2>&1); then
         commit=$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp_dir/manifest.json" | head -n 1 || true)
     fi
     if [ -z "$commit" ]; then
@@ -212,12 +233,12 @@ clone_or_update_repo() {
 
     if [ ! -d "$INSTALL_DIR/.git" ]; then
         info "Clonando $REPO em $INSTALL_DIR..."
-        if need_cmd gh && gh auth status >/dev/null 2>&1; then
-            gh repo clone "$REPO" "$INSTALL_DIR"
-        elif [ -n "${GITHUB_TOKEN:-}" ]; then
-            git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" "$INSTALL_DIR"
-        else
-            git clone "git@github.com:${REPO}.git" "$INSTALL_DIR"
+        git clone "https://github.com/${REPO}.git" "$INSTALL_DIR"
+    else
+        local current_origin
+        current_origin=$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)
+        if printf '%s' "$current_origin" | grep -q "fabriciof807/game-hub"; then
+            git -C "$INSTALL_DIR" remote set-url origin "https://github.com/${REPO}.git"
         fi
     fi
 
