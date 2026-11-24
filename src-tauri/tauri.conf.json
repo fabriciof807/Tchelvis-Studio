@@ -29,6 +29,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": ["deb", "rpm", "appimage"],
+    "icon": ["icons/icon.png"]
   }
 }

@@ -31,7 +31,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.promote_ref || github.ref }}
           fetch-depth: 0
 
-      - name: Install Tauri 2 system dependencies
+      - name: Install Tauri 2 system dependencies & Linux bundlers
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -44,7 +44,9 @@ jobs:
             patchelf \
             build-essential \
             libssl-dev \
-            pkg-config
+            pkg-config \
+            rpm \
+            libfuse2t64 || sudo apt-get install -y libfuse2
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -76,12 +78,14 @@ jobs:
           npm run build
           cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Build Tauri desktop release (stable)
+      - name: Build Tauri desktop release & Linux packages (stable)
         env:
           GAME_HUB_CHANNEL: stable
-        run: cargo build --manifest-path src-tauri/Cargo.toml --release --features desktop,custom-protocol
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          npx --yes @tauri-apps/cli@2 build --bundles deb,rpm,appimage -- --features desktop,custom-protocol
 
-      - name: Package stable artifact
+      - name: Package stable artifacts
         id: pkg
         run: |
           SHORT_SHA="$(git rev-parse --short HEAD)"
@@ -99,7 +103,7 @@ jobs:
             exit 1
           fi
 
-          mkdir -p dist-pkg/defaults
+          mkdir -p dist-pkg/defaults release-assets
           cp src-tauri/target/release/game-hub dist-pkg/game-hub
           chmod +x dist-pkg/game-hub
           cp -r defaults/. dist-pkg/defaults/
@@ -114,8 +118,10 @@ jobs:
           }
           EOF
 
-          tar -C dist-pkg -czf game-hub-linux-x86_64.tar.gz .
-          sha256sum game-hub-linux-x86_64.tar.gz > SHA256SUMS.txt
+          tar -C dist-pkg -czf release-assets/game-hub-linux-x86_64.tar.gz .
+          cp dist-pkg/manifest.json release-assets/manifest.json
+          find src-tauri/target/release/bundle -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" \) -exec cp {} release-assets/ \;
+          (cd release-assets && sha256sum * > SHA256SUMS.txt)
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "published_at=${PUBLISHED_AT}" >> "$GITHUB_OUTPUT"
@@ -144,14 +150,14 @@ jobs:
           NOTES=$(cat <<EOF
           Stable verified release \`${TAG}\` (commit \`${{ steps.pkg.outputs.short_sha }}\`, ${{ steps.pkg.outputs.published_at }}).
 
+          Packages included: \`.deb\`, \`.rpm\`, \`.AppImage\`, and portable \`.tar.gz\`.
+
           Changes:
           ${CHANGES}
           EOF
           )
           gh release create "$TAG" \
-            game-hub-linux-x86_64.tar.gz \
-            SHA256SUMS.txt \
-            dist-pkg/manifest.json \
+            release-assets/* \
             --title "Game Dev Hub ${TAG} (Stable)" \
             --notes "$NOTES" \
             --latest

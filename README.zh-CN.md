@@ -32,22 +32,37 @@
 
 ---
 
-## 安装指南（Linux / Arch / EndeavourOS）
+## 安装指南（Linux 通用安装器与安装包）
 
-### Stable 通道（`0.x.0` — 推荐）
+支持 **Arch / EndeavourOS** (`pacman`)、**Debian / Ubuntu / Mint / Pop!_OS** (`apt`)、**Fedora / RHEL / Nobara** (`dnf`) 和 **openSUSE** (`zypper`)。*（Flatpak 与 Windows 支持将在后续版本中提供。）*
+
+### 通用 `curl` 一键安装（推荐）
 ```bash
+# Stable 通道（0.x.0 — 推荐）
 curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/stable/install.sh | bash
-```
 
-### Nightly 通道（`0.x.x` — 前沿版）
-```bash
+# Nightly 通道（0.x.x — 前沿版）
 curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/nightly/install.sh | bash -s -- --channel nightly
 ```
 
+也可以通过 `--format` 指定安装格式：
+```bash
+# Debian / Ubuntu (.deb)
+curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/stable/install.sh | bash -s -- --format deb
+
+# Fedora / openSUSE / RHEL (.rpm)
+curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/stable/install.sh | bash -s -- --format rpm
+
+# 便携版 AppImage (.AppImage)
+curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/stable/install.sh | bash -s -- --format appimage
+```
+
+或直接前往 [GitHub Releases](https://github.com/fabriciof807/Tchelvis-Studio/releases) 下载 `.deb`、`.rpm`、`.AppImage` 或 `.tar.gz`。
+
 `install.sh` 安装脚本会自动完成：
-1. 通过 `pacman` 安装 Arch/EndeavourOS 所需的系统运行时依赖（`webkit2gtk-4.1`、`gtk3`、`dbus`、`libayatana-appindicator`、`librsvg`、`xdotool`）。
-2. 从 GitHub CI/CD Release 下载预编译二进制包（校验 `SHA256SUMS.txt`）并安装至 `~/.local/bin/game-hub`。
-3. 若对应通道暂无预编译版本或指定了 `--from-source`，则克隆源码至 `~/.local/share/game-hub` 并在本地编译（`npm ci && npm run build` + `cargo build --release --features desktop,custom-protocol`）。
+1. 自动识别您的发行版包管理器（`pacman`、`apt-get`、`dnf`、`zypper`）并安装 WebKitGTK 4.1 / GTK 3 运行时依赖。
+2. 从 GitHub CI/CD Release 下载预编译安装包（校验 `SHA256SUMS.txt`）并完成安装。
+3. 若对应通道暂无预编译版本或指定了 `--from-source`，则克隆源码至 `~/.local/share/game-hub` 并在本地编译。
 4. 复制默认配置至 `~/.config/game-hub/` 并创建桌面启动快捷方式 `~/.local/share/applications/game-hub.desktop`。
 
 > **提示：** 请确保 `~/.local/bin` 已加入 `PATH` 环境变量。之后在终端运行 `game-hub` 或从系统启动器打开 **Game Dev Hub** 即可。

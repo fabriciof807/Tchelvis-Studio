@@ -3,12 +3,13 @@ set -euo pipefail
 
 REPO="${GAME_HUB_REPO:-fabriciof807/Tchelvis-Studio}"
 CHANNEL="${GAME_HUB_CHANNEL:-stable}"
+FORMAT="${GAME_HUB_FORMAT:-auto}"
 FROM_SOURCE=0
 INSTALL_DIR="${GAME_HUB_DIR:-$HOME/.local/share/game-hub}"
 BIN_DIR="${GAME_HUB_BIN_DIR:-$HOME/.local/bin}"
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/game-hub"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-ASSET_NAME="game-hub-linux-x86_64.tar.gz"
+TARBALL_ASSET="game-hub-linux-x86_64.tar.gz"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -18,6 +19,14 @@ while [ "$#" -gt 0 ]; do
             ;;
         --channel=*)
             CHANNEL="${1#*=}"
+            shift
+            ;;
+        --format)
+            FORMAT="${2:-auto}"
+            shift 2
+            ;;
+        --format=*)
+            FORMAT="${1#*=}"
             shift
             ;;
         --from-source)
@@ -35,45 +44,90 @@ case "$CHANNEL" in
     *) CHANNEL="stable" ;;
 esac
 
-info()  { printf '\033[1;34m[game-hub]\033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m[game-hub]\033[0m %s\n' "$*"; }
-error() { printf '\033[1;31m[game-hub]\033[0m %s\n' "$*" >&2; exit 1; }
+info()  { printf '\033[1;34m[tchelvis-studio]\033[0m %s\n' "$*"; }
+warn()  { printf '\033[1;33m[tchelvis-studio]\033[0m %s\n' "$*"; }
+error() { printf '\033[1;31m[tchelvis-studio]\033[0m %s\n' "$*" >&2; exit 1; }
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
 
-install_arch_runtime_deps() {
-    local pkgs=(
-        git
-        curl
-        webkit2gtk-4.1
-        gtk3
-        dbus
-        libayatana-appindicator
-        librsvg
-        xdotool
-    )
-
-    if [ "$FROM_SOURCE" -eq 1 ]; then
-        pkgs+=(base-devel nodejs npm)
-        if ! need_cmd cargo; then
-            pkgs+=(rust)
-        fi
-    fi
-
-    local missing=()
-    for pkg in "${pkgs[@]}"; do
-        if ! pacman -Qi "$pkg" >/dev/null 2>&1; then
-            missing+=("$pkg")
-        fi
-    done
-
-    if [ "${#missing[@]}" -gt 0 ]; then
-        info "Instalando dependências via pacman: ${missing[*]}"
-        sudo pacman -S --needed --noconfirm "${missing[@]}"
+detect_pkg_manager() {
+    if need_cmd pacman; then
+        echo "pacman"
+    elif need_cmd apt-get; then
+        echo "apt"
+    elif need_cmd dnf; then
+        echo "dnf"
+    elif need_cmd zypper; then
+        echo "zypper"
     else
-        info "Todas as dependências necessárias já estão instaladas."
+        echo "unknown"
+    fi
+}
+
+install_linux_deps() {
+    local pm
+    pm=$(detect_pkg_manager)
+
+    case "$pm" in
+        pacman)
+            local pkgs=(git curl webkit2gtk-4.1 gtk3 dbus libayatana-appindicator librsvg xdotool)
+            if [ "$FROM_SOURCE" -eq 1 ]; then
+                pkgs+=(base-devel nodejs npm)
+                if ! need_cmd cargo; then pkgs+=(rust); fi
+            fi
+            local missing=()
+            for pkg in "${pkgs[@]}"; do
+                if ! pacman -Qi "$pkg" >/dev/null 2>&1; then
+                    missing+=("$pkg")
+                fi
+            done
+            if [ "${#missing[@]}" -gt 0 ]; then
+                info "Instalando dependências via pacman: ${missing[*]}"
+                sudo pacman -S --needed --noconfirm "${missing[@]}"
+            else
+                info "Todas as dependências necessárias já estão instaladas."
+            fi
+            ;;
+        apt)
+            local pkgs=(git curl libwebkit2gtk-4.1-0 libgtk-3-0 libdbus-1-3 libayatana-appindicator3-1 librsvg2-2 xdotool)
+            if [ "$FROM_SOURCE" -eq 1 ]; then
+                pkgs+=(build-essential pkg-config patchelf libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev nodejs npm)
+            fi
+            info "Instalando dependências via apt-get..."
+            sudo apt-get update
+            sudo apt-get install -y "${pkgs[@]}"
+            ;;
+        dnf)
+            local pkgs=(git curl webkit2gtk4.1 gtk3 dbus-libs libayatana-appindicator-gtk3 librsvg2 xdotool)
+            if [ "$FROM_SOURCE" -eq 1 ]; then
+                pkgs+=(pkgconf-pkg-config openssl-devel webkit2gtk4.1-devel gtk3-devel dbus-devel libayatana-appindicator-gtk3-devel librsvg2-devel libxdo-devel nodejs npm)
+                info "Instalando dependências de desenvolvimento via dnf..."
+                sudo dnf groupinstall -y "Development Tools" || true
+            else
+                info "Instalando dependências de runtime via dnf..."
+            fi
+            sudo dnf install -y "${pkgs[@]}"
+            ;;
+        zypper)
+            local pkgs=(git curl libwebkit2gtk-4_1-0 gtk3 libdbus-1-3 libayatana-appindicator3-1 librsvg-2-2 xdotool)
+            if [ "$FROM_SOURCE" -eq 1 ]; then
+                pkgs+=(pkg-config libopenssl-devel webkit2gtk3-devel gtk3-devel dbus-1-devel libayatana-appindicator3-devel librsvg-devel xdotool-devel nodejs npm)
+            fi
+            info "Instalando dependências via zypper..."
+            sudo zypper --non-interactive install "${pkgs[@]}"
+            ;;
+        *)
+            warn "Gerenciador de pacotes não reconhecido; assumindo que WebKitGTK 4.1, GTK 3, git e curl já estão instalados."
+            ;;
+    esac
+
+    if [ "$FROM_SOURCE" -eq 1 ] && ! need_cmd cargo; then
+        info "Instalando toolchain Rust via rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        # shellcheck source=/dev/null
+        [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
     fi
 }
 
@@ -99,7 +153,8 @@ write_desktop_entry() {
     cat > "$DESKTOP_DIR/game-hub.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Game Dev Hub
+Name=Tchelvis Studio
+GenericName=Game Dev Hub
 Comment=Local-first Game Design & Agent Orchestration Studio
 Exec=${BIN_DIR}/game-hub
 Terminal=false
@@ -130,15 +185,67 @@ EOF
     fi
 }
 
+fetch_release_info() {
+    local api_json=""
+    if need_cmd curl; then
+        api_json=$(curl -fsSL -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/releases?per_page=15" || true)
+    fi
+    if [ -z "$api_json" ] && need_cmd gh && gh auth status >/dev/null 2>&1; then
+        gh release list --repo "$REPO" --limit 15 --json tagName,isPrerelease,isDraft
+        return
+    fi
+    printf '%s' "$api_json"
+}
+
 try_install_prebuilt_release() {
     if [ "$FROM_SOURCE" -eq 1 ]; then
         return 1
     fi
 
-    local tag=""
-    local tmp_dir=""
+    local target_pattern="$TARBALL_ASSET"
+    case "$FORMAT" in
+        deb) target_pattern='\.deb$' ;;
+        rpm) target_pattern='\.rpm$' ;;
+        appimage) target_pattern='\.AppImage$' ;;
+        *) target_pattern="^${TARBALL_ASSET}$" ;;
+    esac
 
-    if need_cmd gh && gh auth status >/dev/null 2>&1; then
+    local tag=""
+    local asset_name=""
+    local asset_url=""
+
+    if need_cmd curl && need_cmd python3; then
+        local api_json
+        api_json=$(curl -fsSL -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/releases?per_page=15" || true)
+        if [ -n "$api_json" ]; then
+            local parsed
+            parsed=$(printf '%s' "$api_json" | python3 -c '
+import json, re, sys
+channel, pattern = sys.argv[1], sys.argv[2]
+releases = json.load(sys.stdin)
+for r in releases:
+    if r.get("draft"): continue
+    is_nightly = (r.get("tag_name") == "nightly" or bool(r.get("prerelease")))
+    if channel == "nightly" and not is_nightly: continue
+    if channel != "nightly" and is_nightly: continue
+    for a in r.get("assets", []):
+        if re.search(pattern, a.get("name", "")):
+            print(r["tag_name"])
+            print(a["name"])
+            print(a["browser_download_url"])
+            sys.exit(0)
+' "$CHANNEL" "$target_pattern" 2>/dev/null || true)
+            if [ -n "$parsed" ]; then
+                tag=$(printf '%s\n' "$parsed" | sed -n '1p')
+                asset_name=$(printf '%s\n' "$parsed" | sed -n '2p')
+                asset_url=$(printf '%s\n' "$parsed" | sed -n '3p')
+            fi
+        fi
+    fi
+
+    if [ -z "$tag" ] && need_cmd gh && gh auth status >/dev/null 2>&1; then
         if [ "$CHANNEL" = "nightly" ]; then
             tag=$(gh release list --repo "$REPO" --limit 15 --json tagName,isPrerelease,isDraft \
                 --jq '.[] | select(.isDraft == false and (.tagName == "nightly" or .isPrerelease == true)) | .tagName' \
@@ -148,38 +255,26 @@ try_install_prebuilt_release() {
                 --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName' \
                 | head -n 1 || true)
         fi
-    elif need_cmd curl && need_cmd python3; then
-        local api_json
-        api_json=$(curl -fsSL -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/releases?per_page=15" || true)
-        if [ -n "$api_json" ]; then
-            tag=$(printf '%s' "$api_json" | python3 -c '
-import json, sys
-channel = sys.argv[1]
-releases = json.load(sys.stdin)
-for r in releases:
-    if r.get("draft"): continue
-    has_asset = any(a.get("name") == "game-hub-linux-x86_64.tar.gz" for a in r.get("assets", []))
-    if not has_asset: continue
-    if channel == "nightly" and (r.get("tag_name") == "nightly" or r.get("prerelease")):
-        print(r["tag_name"]); break
-    if channel != "nightly" and not r.get("prerelease"):
-        print(r["tag_name"]); break
-' "$CHANNEL" 2>/dev/null || true)
+        if [ -n "$tag" ]; then
+            asset_name=$(gh release view "$tag" --repo "$REPO" --json assets \
+                --jq ".assets[] | select(.name | test(\"${target_pattern}\")) | .name" | head -n 1 || true)
         fi
     fi
 
-    if [ -z "$tag" ]; then
+    if [ -z "$tag" ] || [ -z "$asset_name" ]; then
         return 1
     fi
 
-    info "Baixando release pré-compilada do CI/CD (${CHANNEL}: ${tag})..."
+    info "Baixando release pré-compilada do CI/CD (${CHANNEL}: ${tag} · ${asset_name})..."
+    local tmp_dir
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' RETURN
 
-    if ! curl -fsSL -L "https://github.com/${REPO}/releases/download/${tag}/${ASSET_NAME}" -o "$tmp_dir/$ASSET_NAME"; then
+    if [ -n "$asset_url" ] && curl -fsSL -L "$asset_url" -o "$tmp_dir/$asset_name"; then
+        :
+    elif ! curl -fsSL -L "https://github.com/${REPO}/releases/download/${tag}/${asset_name}" -o "$tmp_dir/$asset_name"; then
         if need_cmd gh && gh auth status >/dev/null 2>&1; then
-            gh release download "$tag" --repo "$REPO" -p "$ASSET_NAME" -D "$tmp_dir"
+            gh release download "$tag" --repo "$REPO" -p "$asset_name" -D "$tmp_dir"
         else
             return 1
         fi
@@ -187,7 +282,7 @@ for r in releases:
 
     if curl -fsSL -L "https://github.com/${REPO}/releases/download/${tag}/SHA256SUMS.txt" -o "$tmp_dir/SHA256SUMS.txt" 2>/dev/null \
         || (need_cmd gh && gh release download "$tag" --repo "$REPO" -p SHA256SUMS.txt -D "$tmp_dir" >/dev/null 2>&1); then
-        (cd "$tmp_dir" && sha256sum -c SHA256SUMS.txt)
+        (cd "$tmp_dir" && grep -F "  ${asset_name}" SHA256SUMS.txt > check.sha256 && sha256sum -c check.sha256) || true
     fi
 
     local commit=""
@@ -199,17 +294,46 @@ for r in releases:
         commit="$tag"
     fi
 
-    mkdir -p "$tmp_dir/extracted"
-    tar -xzf "$tmp_dir/$ASSET_NAME" -C "$tmp_dir/extracted"
-
-    mkdir -p "$BIN_DIR"
-    install -Dm755 "$tmp_dir/extracted/game-hub" "$BIN_DIR/game-hub"
-    install_defaults_dir "$tmp_dir/extracted/defaults"
-    write_desktop_entry
-    write_install_state "$tag" "$commit"
-
-    info "Instalado via CI/CD (${CHANNEL} · ${tag}) em $BIN_DIR/game-hub"
-    return 0
+    case "$FORMAT" in
+        deb)
+            info "Instalando pacote .deb..."
+            sudo apt-get install -y "$tmp_dir/$asset_name" || { sudo dpkg -i "$tmp_dir/$asset_name" && sudo apt-get install -f -y; }
+            write_install_state "$tag" "$commit"
+            return 0
+            ;;
+        rpm)
+            info "Instalando pacote .rpm..."
+            if need_cmd dnf; then
+                sudo dnf install -y "$tmp_dir/$asset_name"
+            elif need_cmd zypper; then
+                sudo zypper --non-interactive install --allow-unsigned-rpm "$tmp_dir/$asset_name"
+            else
+                sudo rpm -Uvh --replacepkgs "$tmp_dir/$asset_name"
+            fi
+            write_install_state "$tag" "$commit"
+            return 0
+            ;;
+        appimage)
+            mkdir -p "$BIN_DIR"
+            install -Dm755 "$tmp_dir/$asset_name" "$BIN_DIR/game-hub.AppImage"
+            ln -sf "$BIN_DIR/game-hub.AppImage" "$BIN_DIR/game-hub"
+            write_desktop_entry
+            write_install_state "$tag" "$commit"
+            info "AppImage instalado em $BIN_DIR/game-hub.AppImage (link: $BIN_DIR/game-hub)"
+            return 0
+            ;;
+        *)
+            mkdir -p "$tmp_dir/extracted"
+            tar -xzf "$tmp_dir/$asset_name" -C "$tmp_dir/extracted"
+            mkdir -p "$BIN_DIR"
+            install -Dm755 "$tmp_dir/extracted/game-hub" "$BIN_DIR/game-hub"
+            install_defaults_dir "$tmp_dir/extracted/defaults"
+            write_desktop_entry
+            write_install_state "$tag" "$commit"
+            info "Instalado via CI/CD (${CHANNEL} · ${tag}) em $BIN_DIR/game-hub"
+            return 0
+            ;;
+    esac
 }
 
 resolve_target_branch() {
@@ -273,11 +397,7 @@ build_and_install_from_source() {
 }
 
 main() {
-    if need_cmd pacman; then
-        install_arch_runtime_deps
-    else
-        warn "pacman não encontrado; assumindo que as dependências do sistema já estão instaladas."
-    fi
+    install_linux_deps
 
     if try_install_prebuilt_release; then
         case ":${PATH}:" in
@@ -289,9 +409,7 @@ main() {
     fi
 
     FROM_SOURCE=1
-    if need_cmd pacman; then
-        install_arch_runtime_deps
-    fi
+    install_linux_deps
     clone_or_update_repo
     build_and_install_from_source
 

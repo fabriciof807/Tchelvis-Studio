@@ -32,22 +32,37 @@ Construído com **Tauri v2 (Rust + WebKitGTK)**, **React 19**, **TypeScript**, *
 
 ---
 
-## Como Instalar (Linux / Arch / EndeavourOS)
+## Como Instalar (Linux — Instalador Universal & Pacotes)
 
-### Canal Stable (`0.x.0` — Recomendado)
+Compatível com **Arch / EndeavourOS** (`pacman`), **Debian / Ubuntu / Mint / Pop!_OS** (`apt`), **Fedora / RHEL / Nobara** (`dnf`) e **openSUSE** (`zypper`). *(Suporte a Flatpak e Windows ficará para uma etapa futura.)*
+
+### Instalador Universal via `curl` (Recomendado)
 ```bash
+# Canal Stable (0.x.0 — Recomendado)
 curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/stable/install.sh | bash
-```
 
-### Canal Nightly (`0.x.x` — Bleeding Edge)
-```bash
+# Canal Nightly (0.x.x — Bleeding Edge)
 curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/nightly/install.sh | bash -s -- --channel nightly
 ```
 
+Você também pode escolher o formato de pacote diretamente com `--format`:
+```bash
+# Debian / Ubuntu (.deb)
+curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/stable/install.sh | bash -s -- --format deb
+
+# Fedora / openSUSE / RHEL (.rpm)
+curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/stable/install.sh | bash -s -- --format rpm
+
+# AppImage portátil (.AppImage)
+curl -fsSL https://raw.githubusercontent.com/fabriciof807/Tchelvis-Studio/stable/install.sh | bash -s -- --format appimage
+```
+
+Ou baixe diretamente `.deb`, `.rpm`, `.AppImage` ou `.tar.gz` na página de [Releases no GitHub](https://github.com/fabriciof807/Tchelvis-Studio/releases).
+
 O instalador `install.sh`:
-1. Instala dependências de runtime necessárias no Arch/EndeavourOS via `pacman` (`webkit2gtk-4.1`, `gtk3`, `dbus`, `libayatana-appindicator`, `librsvg`, `xdotool`).
-2. Baixa a release pré-compilada pelo CI/CD do GitHub (com verificação `SHA256SUMS.txt`) e instala o binário em `~/.local/bin/game-hub`.
-3. Se ainda não houver release pré-compilada para o canal ou se `--from-source` for passado, clona em `~/.local/share/game-hub` e compila localmente (`npm ci && npm run build` + `cargo build --release --features desktop,custom-protocol`).
+1. Detecta automaticamente o gerenciador de pacotes da sua distro (`pacman`, `apt-get`, `dnf`, `zypper`) e instala as dependências de runtime do WebKitGTK 4.1 / GTK 3.
+2. Baixa o pacote pré-compilado pelo CI/CD do GitHub (com verificação `SHA256SUMS.txt`) e realiza a instalação.
+3. Se ainda não houver release pré-compilada para o canal ou se `--from-source` for passado, clona em `~/.local/share/game-hub` e compila localmente.
 4. Copia configurações padrão para `~/.config/game-hub/` e cria o atalho `~/.local/share/applications/game-hub.desktop`.
 
 > **Dica:** Certifique-se de que `~/.local/bin` está no seu `PATH`. Depois, basta executar `game-hub` ou abrir **Game Dev Hub** no launcher do sistema.
