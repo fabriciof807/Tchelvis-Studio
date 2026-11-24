@@ -1,3 +1,4 @@
+pub mod browser_panel;
 pub mod compositor;
 pub mod flow_bridge;
 pub mod fs_watcher;
@@ -24,10 +25,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use types::{
-    AmbientEnvelope, CaptureResult, CaptureSaved, FileTreeNode, FlowBridgeCallbackPayload,
-    FlowGenerationResult, GlobalConfig, LensInfo, LoopRunState, MarkdownFilePayload,
-    MergeCheckResult, MergeResult, PiTurnAck, PreviewStatus, ProjectConfig, RecentWorkspace,
-    UpdateApplyResult, UpdateCheckResult, WorkspaceInfo, WriteMarkdownResult,
+    AmbientEnvelope, BrowserBounds, BrowserPanelState, BrowserSnapshotResult, CaptureResult,
+    CaptureSaved, FileTreeNode, FlowBridgeCallbackPayload, FlowGenerationResult, GlobalConfig,
+    LensInfo, LoopRunState, MarkdownFilePayload, MergeCheckResult, MergeResult, PiTurnAck,
+    PreviewStatus, ProjectConfig, RecentWorkspace, UpdateApplyResult, UpdateCheckResult,
+    WorkspaceInfo, WriteMarkdownResult,
 };
 
 /// Shared microkernel state used by both headless tests and Tauri desktop IPC.
@@ -45,6 +47,7 @@ pub struct AppState {
     pub watcher: Mutex<Option<WorkspaceWatcher>>,
     pub control_socket: Mutex<Option<ControlSocket>>,
     pub flow_bridge: Arc<flow_bridge::FlowBridgeManager>,
+    pub browser_panel: Arc<browser_panel::BrowserPanelManager>,
 }
 
 impl AppState {
@@ -57,6 +60,7 @@ impl AppState {
         let control_socket = ControlSocket::bind().ok();
         let echo_cache = Arc::new(Mutex::new(EchoSuppressionCache::default()));
         let flow_bridge = Arc::new(flow_bridge::FlowBridgeManager::new(Arc::clone(&echo_cache)));
+        let browser_panel = Arc::new(browser_panel::BrowserPanelManager::new());
 
         Self {
             workspace_root: Mutex::new(None),
@@ -72,6 +76,7 @@ impl AppState {
             watcher: Mutex::new(None),
             control_socket: Mutex::new(control_socket),
             flow_bridge,
+            browser_panel,
         }
     }
 
@@ -500,6 +505,71 @@ pub async fn cmd_dispatch_flow_generation<D: flow_bridge::FlowBrowserDriver>(
     .await
 }
 
+pub fn cmd_browser_navigate<D: browser_panel::BrowserChildDriver>(
+    state: &AppState,
+    driver: &D,
+    url: String,
+    bounds: Option<BrowserBounds>,
+) -> Result<BrowserPanelState, String> {
+    state.browser_panel.navigate(driver, &url, bounds)
+}
+
+pub fn cmd_browser_sync_bounds<D: browser_panel::BrowserChildDriver>(
+    state: &AppState,
+    driver: &D,
+    bounds: BrowserBounds,
+) -> Result<BrowserPanelState, String> {
+    state.browser_panel.sync_bounds(driver, bounds)
+}
+
+pub fn cmd_browser_set_visible<D: browser_panel::BrowserChildDriver>(
+    state: &AppState,
+    driver: &D,
+    visible: bool,
+) -> Result<BrowserPanelState, String> {
+    state.browser_panel.set_visible(driver, visible)
+}
+
+pub fn cmd_browser_go_back<D: browser_panel::BrowserChildDriver>(
+    state: &AppState,
+    driver: &D,
+) -> Result<BrowserPanelState, String> {
+    state.browser_panel.go_back(driver)
+}
+
+pub fn cmd_browser_go_forward<D: browser_panel::BrowserChildDriver>(
+    state: &AppState,
+    driver: &D,
+) -> Result<BrowserPanelState, String> {
+    state.browser_panel.go_forward(driver)
+}
+
+pub fn cmd_browser_reload<D: browser_panel::BrowserChildDriver>(
+    state: &AppState,
+    driver: &D,
+) -> Result<BrowserPanelState, String> {
+    state.browser_panel.reload(driver)
+}
+
+pub fn cmd_browser_close<D: browser_panel::BrowserChildDriver>(
+    state: &AppState,
+    driver: &D,
+) -> Result<BrowserPanelState, String> {
+    state.browser_panel.close(driver)
+}
+
+pub fn cmd_browser_get_state(state: &AppState) -> Result<BrowserPanelState, String> {
+    state.browser_panel.get_state()
+}
+
+pub fn cmd_browser_capture_snapshot<D: browser_panel::BrowserChildDriver>(
+    state: &AppState,
+    driver: &D,
+    bounds: Option<BrowserBounds>,
+) -> Result<BrowserSnapshotResult, String> {
+    state.browser_panel.capture_snapshot(driver, bounds)
+}
+
 #[cfg(feature = "desktop")]
 mod desktop_ipc {
     use super::*;
@@ -859,6 +929,130 @@ mod desktop_ipc {
         Ok(cfg.flow_url)
     }
 
+    #[tauri::command]
+    pub fn browser_navigate(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+        url: String,
+        bounds: Option<BrowserBounds>,
+    ) -> Result<BrowserPanelState, String> {
+        let driver = browser_panel::desktop_driver::TauriChildWebviewDriver {
+            app: app.clone(),
+            manager: Arc::clone(&state.browser_panel),
+        };
+        let res = cmd_browser_navigate(&state, &driver, url, bounds)?;
+        let _ = app.emit("browser://state", &res);
+        Ok(res)
+    }
+
+    #[tauri::command]
+    pub fn browser_sync_bounds(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+        bounds: BrowserBounds,
+    ) -> Result<BrowserPanelState, String> {
+        let driver = browser_panel::desktop_driver::TauriChildWebviewDriver {
+            app: app.clone(),
+            manager: Arc::clone(&state.browser_panel),
+        };
+        let res = cmd_browser_sync_bounds(&state, &driver, bounds)?;
+        let _ = app.emit("browser://state", &res);
+        Ok(res)
+    }
+
+    #[tauri::command]
+    pub fn browser_set_visible(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+        visible: bool,
+    ) -> Result<BrowserPanelState, String> {
+        let driver = browser_panel::desktop_driver::TauriChildWebviewDriver {
+            app: app.clone(),
+            manager: Arc::clone(&state.browser_panel),
+        };
+        let res = cmd_browser_set_visible(&state, &driver, visible)?;
+        let _ = app.emit("browser://state", &res);
+        Ok(res)
+    }
+
+    #[tauri::command]
+    pub fn browser_go_back(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<BrowserPanelState, String> {
+        let driver = browser_panel::desktop_driver::TauriChildWebviewDriver {
+            app: app.clone(),
+            manager: Arc::clone(&state.browser_panel),
+        };
+        let res = cmd_browser_go_back(&state, &driver)?;
+        let _ = app.emit("browser://state", &res);
+        Ok(res)
+    }
+
+    #[tauri::command]
+    pub fn browser_go_forward(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<BrowserPanelState, String> {
+        let driver = browser_panel::desktop_driver::TauriChildWebviewDriver {
+            app: app.clone(),
+            manager: Arc::clone(&state.browser_panel),
+        };
+        let res = cmd_browser_go_forward(&state, &driver)?;
+        let _ = app.emit("browser://state", &res);
+        Ok(res)
+    }
+
+    #[tauri::command]
+    pub fn browser_reload(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<BrowserPanelState, String> {
+        let driver = browser_panel::desktop_driver::TauriChildWebviewDriver {
+            app: app.clone(),
+            manager: Arc::clone(&state.browser_panel),
+        };
+        let res = cmd_browser_reload(&state, &driver)?;
+        let _ = app.emit("browser://state", &res);
+        Ok(res)
+    }
+
+    #[tauri::command]
+    pub fn browser_close(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<BrowserPanelState, String> {
+        let driver = browser_panel::desktop_driver::TauriChildWebviewDriver {
+            app: app.clone(),
+            manager: Arc::clone(&state.browser_panel),
+        };
+        let res = cmd_browser_close(&state, &driver)?;
+        let _ = app.emit("browser://state", &res);
+        Ok(res)
+    }
+
+    #[tauri::command]
+    pub fn browser_get_state(state: State<'_, AppState>) -> Result<BrowserPanelState, String> {
+        cmd_browser_get_state(&state)
+    }
+
+    #[tauri::command]
+    pub fn browser_capture_snapshot(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+        bounds: Option<BrowserBounds>,
+    ) -> Result<BrowserSnapshotResult, String> {
+        let driver = browser_panel::desktop_driver::TauriChildWebviewDriver {
+            app: app.clone(),
+            manager: Arc::clone(&state.browser_panel),
+        };
+        let res = cmd_browser_capture_snapshot(&state, &driver, bounds)?;
+        if let Ok(st) = cmd_browser_get_state(&state) {
+            let _ = app.emit("browser://state", &st);
+        }
+        Ok(res)
+    }
+
     pub fn run_desktop(global_config: GlobalConfig) {
         tauri::Builder::default()
             .plugin(tauri_plugin_fs::init())
@@ -901,6 +1095,15 @@ mod desktop_ipc {
                 dispatch_flow_generation,
                 flow_bridge_result,
                 open_flow_browser,
+                browser_navigate,
+                browser_sync_bounds,
+                browser_set_visible,
+                browser_go_back,
+                browser_go_forward,
+                browser_reload,
+                browser_close,
+                browser_get_state,
+                browser_capture_snapshot,
             ])
             .run(tauri::generate_context!())
             .expect("error while running Game Dev Hub");

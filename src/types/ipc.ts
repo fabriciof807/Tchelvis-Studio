@@ -197,6 +197,32 @@ export interface PreviewCaptureResult {
   log_tail: string[];
 }
 
+export interface BrowserBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface BrowserPanelState {
+  initialized: boolean;
+  url: string;
+  title: string;
+  visible: boolean;
+  loading: boolean;
+  bounds: BrowserBounds;
+  can_go_back: boolean;
+  can_go_forward: boolean;
+}
+
+export interface BrowserSnapshotResult {
+  data_url?: string | null;
+  width: number;
+  height: number;
+  backend: string;
+  fallback_reason?: string | null;
+}
+
 export interface GitMergeCheckResult {
   can_merge_cleanly: boolean;
   dirty_files: string[];
@@ -365,6 +391,86 @@ let mockLayoutJson: string | null = null;
 const mockPresets = new Map<string, string>();
 let mockPreviewRunning = false;
 let mockPtyCounter = 0;
+
+const FORBIDDEN_BROWSER_SCHEMES = [
+  'file:',
+  'javascript:',
+  'data:',
+  'vbscript:',
+  'tauri:',
+  'ipc:',
+  'asset:',
+  'blob:',
+  'about:',
+];
+
+export function isAllowedBrowserUrl(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+    return false;
+  }
+  if (/[\s\x00-\x1f\x7f]/.test(trimmed)) {
+    return false;
+  }
+  const rest = trimmed.slice(trimmed.indexOf('://') + 3);
+  const host = rest.split(/[/?#]/)[0];
+  return host.length > 0;
+}
+
+export function normalizeAndValidateBrowserUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new Error('URL must not be empty');
+  }
+  const lower = trimmed.toLowerCase();
+  for (const scheme of FORBIDDEN_BROWSER_SCHEMES) {
+    if (lower.startsWith(scheme)) {
+      throw new Error(`blocked URL scheme in '${trimmed}' (only http:// and https:// are allowed)`);
+    }
+  }
+  let candidate = trimmed;
+  if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+    if (trimmed.includes('://')) {
+      throw new Error(`blocked URL scheme in '${trimmed}' (only http:// and https:// are allowed)`);
+    }
+    if (lower.startsWith('localhost') || lower.startsWith('127.0.0.1')) {
+      candidate = `http://${trimmed}`;
+    } else {
+      candidate = `https://${trimmed}`;
+    }
+  }
+  if (!isAllowedBrowserUrl(candidate)) {
+    throw new Error(`invalid browser URL: '${trimmed}'`);
+  }
+  return candidate;
+}
+
+const MOCK_1X1_PNG_DATA_URL =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+const mockBrowserHistory: string[] = [];
+let mockBrowserHistoryIndex = 0;
+let mockBrowserState: BrowserPanelState = {
+  initialized: false,
+  url: 'https://labs.google/fx/tools/flow',
+  title: 'Browser',
+  visible: false,
+  loading: false,
+  bounds: { x: 0, y: 0, width: 800, height: 600 },
+  can_go_back: false,
+  can_go_forward: false,
+};
+
+function syncMockBrowserHistoryFlags(): BrowserPanelState {
+  mockBrowserState = {
+    ...mockBrowserState,
+    can_go_back: mockBrowserHistoryIndex > 0,
+    can_go_forward: mockBrowserHistoryIndex + 1 < mockBrowserHistory.length,
+  };
+  return { ...mockBrowserState, bounds: { ...mockBrowserState.bounds } };
+}
 
 function computeSimpleHash(text: string): string {
   let h = 2166136261;
@@ -836,5 +942,118 @@ export const ipc = {
       return invoke<string>('open_flow_browser');
     }
     return 'https://labs.google/fx/tools/flow';
+  },
+
+  async browserNavigate(url: string, bounds?: BrowserBounds): Promise<BrowserPanelState> {
+    if (isTauriEnv()) {
+      return invoke<BrowserPanelState>('browser_navigate', { url, bounds: bounds ?? null });
+    }
+    const validUrl = normalizeAndValidateBrowserUrl(url);
+    if (bounds) {
+      mockBrowserState.bounds = {
+        x: bounds.x,
+        y: bounds.y,
+        width: Math.max(1, bounds.width),
+        height: Math.max(1, bounds.height),
+      };
+    }
+    if (!mockBrowserState.initialized) {
+      mockBrowserState.initialized = true;
+      mockBrowserState.visible = true;
+    }
+    mockBrowserState.url = validUrl;
+    if (mockBrowserHistory.length === 0) {
+      mockBrowserHistory.push(validUrl);
+      mockBrowserHistoryIndex = 0;
+    } else if (mockBrowserHistory[mockBrowserHistoryIndex] !== validUrl) {
+      mockBrowserHistory.splice(mockBrowserHistoryIndex + 1);
+      mockBrowserHistory.push(validUrl);
+      mockBrowserHistoryIndex = mockBrowserHistory.length - 1;
+    }
+    return syncMockBrowserHistoryFlags();
+  },
+
+  async browserSyncBounds(bounds: BrowserBounds): Promise<BrowserPanelState> {
+    if (isTauriEnv()) {
+      return invoke<BrowserPanelState>('browser_sync_bounds', { bounds });
+    }
+    mockBrowserState.bounds = {
+      x: bounds.x,
+      y: bounds.y,
+      width: Math.max(1, bounds.width),
+      height: Math.max(1, bounds.height),
+    };
+    return syncMockBrowserHistoryFlags();
+  },
+
+  async browserSetVisible(visible: boolean): Promise<BrowserPanelState> {
+    if (isTauriEnv()) {
+      return invoke<BrowserPanelState>('browser_set_visible', { visible });
+    }
+    mockBrowserState.visible = visible;
+    return syncMockBrowserHistoryFlags();
+  },
+
+  async browserGoBack(): Promise<BrowserPanelState> {
+    if (isTauriEnv()) {
+      return invoke<BrowserPanelState>('browser_go_back');
+    }
+    if (mockBrowserHistoryIndex > 0) {
+      mockBrowserHistoryIndex -= 1;
+      mockBrowserState.url = mockBrowserHistory[mockBrowserHistoryIndex];
+    }
+    return syncMockBrowserHistoryFlags();
+  },
+
+  async browserGoForward(): Promise<BrowserPanelState> {
+    if (isTauriEnv()) {
+      return invoke<BrowserPanelState>('browser_go_forward');
+    }
+    if (mockBrowserHistoryIndex + 1 < mockBrowserHistory.length) {
+      mockBrowserHistoryIndex += 1;
+      mockBrowserState.url = mockBrowserHistory[mockBrowserHistoryIndex];
+    }
+    return syncMockBrowserHistoryFlags();
+  },
+
+  async browserReload(): Promise<BrowserPanelState> {
+    if (isTauriEnv()) {
+      return invoke<BrowserPanelState>('browser_reload');
+    }
+    return syncMockBrowserHistoryFlags();
+  },
+
+  async browserClose(): Promise<BrowserPanelState> {
+    if (isTauriEnv()) {
+      return invoke<BrowserPanelState>('browser_close');
+    }
+    mockBrowserState.initialized = false;
+    mockBrowserState.visible = false;
+    mockBrowserState.loading = false;
+    return syncMockBrowserHistoryFlags();
+  },
+
+  async browserGetState(): Promise<BrowserPanelState> {
+    if (isTauriEnv()) {
+      return invoke<BrowserPanelState>('browser_get_state');
+    }
+    return syncMockBrowserHistoryFlags();
+  },
+
+  async browserCaptureSnapshot(bounds?: BrowserBounds): Promise<BrowserSnapshotResult> {
+    if (isTauriEnv()) {
+      return invoke<BrowserSnapshotResult>('browser_capture_snapshot', {
+        bounds: bounds ?? null,
+      });
+    }
+    const target = bounds ?? mockBrowserState.bounds;
+    mockBrowserState.visible = false;
+    return {
+      data_url: MOCK_1X1_PNG_DATA_URL,
+      width: Math.max(1, Math.round(target.width)),
+      height: Math.max(1, Math.round(target.height)),
+      backend: 'mock_grim',
+      fallback_reason: null,
+    };
   },
 };

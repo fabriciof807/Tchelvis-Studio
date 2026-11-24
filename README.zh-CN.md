@@ -121,4 +121,4 @@ rm -rf ~/.local/state/game-hub
 
 ## 许可证
 
-请参阅仓库中的许可证与贡献说明。
+本项目基于 [Apache License 2.0](LICENSE) 开源。

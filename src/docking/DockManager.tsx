@@ -24,6 +24,7 @@ import {
   CloseIcon,
   FileTextIcon,
   FolderIcon,
+  GlobeIcon,
   ImageIcon,
   LayersIcon,
   MessageSquareIcon,
@@ -332,6 +333,8 @@ export const DockManager: React.FC = () => {
       panelId = 'loops:main';
     } else if (panelType === 'terminal') {
       panelId = 'terminal:main';
+    } else if ((panelType as string) === 'browser') {
+      panelId = 'browser:main';
     }
 
     const existing = api.getPanel(panelId);
@@ -351,6 +354,23 @@ export const DockManager: React.FC = () => {
 
     clearPendingPanelRequest();
   }, [pendingPanelRequest, clearPendingPanelRequest]);
+
+  const handleOpenBrowserPanel = useCallback(() => {
+    const api = dockApiRef.current;
+    if (!api) return;
+    const panelId = 'browser:main';
+    const existing = api.getPanel(panelId);
+    if (existing) {
+      existing.api.setActive();
+    } else {
+      api.addPanel({
+        id: panelId,
+        component: 'browser',
+        title: t('browser.tabTitle'),
+        params: { initialUrl: 'https://labs.google/fx/tools/flow' },
+      });
+    }
+  }, [t]);
 
   const handleOpenFile = useCallback(
     (relPath: string, name: string) => {
@@ -425,6 +445,14 @@ export const DockManager: React.FC = () => {
 
           <div className="activity-spacer" />
 
+          <button
+            type="button"
+            className="activity-btn"
+            onClick={handleOpenBrowserPanel}
+            title={t('activity.browser')}
+          >
+            <GlobeIcon size={16} />
+          </button>
           <button
             type="button"
             className={`activity-btn ${previewStatus?.running ? 'active' : ''}`}

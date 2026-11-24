@@ -121,4 +121,4 @@ rm -rf ~/.local/state/game-hub
 
 ## License
 
-See repository metadata for licensing and contribution details.
+Licensed under the [Apache License 2.0](LICENSE).

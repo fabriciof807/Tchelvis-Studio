@@ -234,3 +234,84 @@ export const PaletteIcon: React.FC<IconProps> = ({ size = 15, className }) => (
     <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z" />
   </svg>
 );
+
+export const ArrowLeftIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="m12 19-7-7 7-7" />
+    <path d="M19 12H5" />
+  </svg>
+);
+
+export const ArrowRightIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M5 12h14" />
+    <path d="m12 5 7 7-7 7" />
+  </svg>
+);
+
+export const ExternalLinkIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M15 3h6v6" />
+    <path d="M10 14 21 3" />
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+  </svg>
+);
+
+export const PenToolIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M12 19l7-7 3 3-7 7-3-3z" />
+    <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" />
+    <path d="M2 2l7.586 7.586" />
+    <circle cx="11" cy="11" r="2" />
+  </svg>
+);
+
+export const SquareIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <rect width="16" height="16" x="4" y="4" rx="2" />
+  </svg>
+);
+
+export const ArrowUpRightIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M7 17 17 7" />
+    <path d="M7 7h10v10" />
+  </svg>
+);
+
+export const TypeIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <polyline points="4 7 4 4 20 4 20 7" />
+    <line x1="9" x2="15" y1="20" y2="20" />
+    <line x1="12" x2="12" y1="4" y2="20" />
+  </svg>
+);
+
+export const UndoIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M3 7v6h6" />
+    <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
+  </svg>
+);
+
+export const TrashIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M3 6h18" />
+    <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+    <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+  </svg>
+);
+
+export const SendIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="m22 2-7 20-4-9-9-4Z" />
+    <path d="M22 2 11 13" />
+  </svg>
+);
+
+export const CameraIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
+    <circle cx="12" cy="13" r="3" />
+  </svg>
+);

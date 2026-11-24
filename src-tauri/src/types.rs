@@ -344,3 +344,46 @@ pub struct FlowBridgeCallbackPayload {
     pub mime_type: Option<String>,
     pub error: Option<String>,
 }
+
+/// Logical viewport bounds of the embedded BrowserPanel relative to the main window client area.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct BrowserBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Default for BrowserBounds {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        }
+    }
+}
+
+/// Current state of the embedded BrowserPanel child WebView.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BrowserPanelState {
+    pub initialized: bool,
+    pub url: String,
+    pub title: String,
+    pub visible: bool,
+    pub loading: bool,
+    pub bounds: BrowserBounds,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+}
+
+/// Result returned by `browser_capture_snapshot`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct BrowserSnapshotResult {
+    pub data_url: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub backend: String,
+    pub fallback_reason: Option<String>,
+}
