@@ -140,6 +140,16 @@ fn run_git(repo_dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn detect_local_commit(repo_dir: Option<&Path>) -> String {
+    if let Some(state) = read_install_state() {
+        if !state.commit.is_empty() {
+            return state.commit;
+        }
+    }
+    if let Some(built) = option_env!("HUB_BUILD_COMMIT") {
+        if !built.is_empty() && built != "unknown" {
+            return built.to_string();
+        }
+    }
     if let Some(dir) = repo_dir {
         if let Ok(sha) = run_git(dir, &["rev-parse", "--short", "HEAD"]) {
             if !sha.is_empty() {
@@ -147,14 +157,7 @@ fn detect_local_commit(repo_dir: Option<&Path>) -> String {
             }
         }
     }
-    if let Some(state) = read_install_state() {
-        if !state.commit.is_empty() {
-            return state.commit;
-        }
-    }
-    option_env!("HUB_BUILD_COMMIT")
-        .unwrap_or("unknown")
-        .to_string()
+    "unknown".to_string()
 }
 
 fn detect_branch_for_channel(repo_dir: &Path, channel: &str) -> String {
@@ -307,21 +310,23 @@ fn check_github_release_channel(channel: &str, repo_dir: Option<&Path>) -> Optio
     let mut changelog: Vec<String> = Vec::new();
     let mut commits_behind: u32 = if update_available { 1 } else { 0 };
 
-    if let Some(dir) = repo_dir {
-        if run_git(dir, &["fetch", "origin", "--tags"]).is_ok() {
-            let range = format!("HEAD..{remote_commit}");
-            if let Ok(count_str) = run_git(dir, &["rev-list", "--count", &range]) {
-                if let Ok(n) = count_str.parse::<u32>() {
-                    commits_behind = n.max(if update_available { 1 } else { 0 });
+    if update_available {
+        if let Some(dir) = repo_dir {
+            if run_git(dir, &["fetch", "origin", "--tags"]).is_ok() && current_commit != "unknown" {
+                let range = format!("{current_commit}..{remote_commit}");
+                if let Ok(count_str) = run_git(dir, &["rev-list", "--count", &range]) {
+                    if let Ok(n) = count_str.parse::<u32>() {
+                        commits_behind = n.max(1);
+                    }
                 }
-            }
-            if let Ok(log_out) = run_git(dir, &["log", "--oneline", "-n", "20", &range]) {
-                changelog = log_out
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .map(ToString::to_string)
-                    .collect();
+                if let Ok(log_out) = run_git(dir, &["log", "--no-merges", "--oneline", "-n", "20", &range]) {
+                    changelog = log_out
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(ToString::to_string)
+                        .collect();
+                }
             }
         }
     }

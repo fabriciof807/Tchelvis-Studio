@@ -1,13 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EditorState, Compartment } from '@codemirror/state';
-import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view';
+import { EditorView, keymap, highlightActiveLine } from '@codemirror/view';
 import { markdown } from '@codemirror/lang-markdown';
 import { autocompletion, type CompletionContext } from '@codemirror/autocomplete';
 import type { IDockviewPanelProps } from 'dockview-react';
 import {
   ipc,
   listenEvent,
-  safeConvertFileSrc,
   type FsChangedPayload,
 } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
@@ -17,8 +16,7 @@ import {
   getWikilinkCompletions,
   resolveWikilink,
 } from './markdownIndex';
-
-type ViewMode = 'editor' | 'split' | 'preview';
+import { createMarkdownLivePreviewExtension } from './markdownLivePreview';
 
 export interface MarkdownPanelParams {
   relPath: string;
@@ -28,25 +26,31 @@ const editorTheme = EditorView.theme(
   {
     '&': {
       height: '100%',
-      backgroundColor: '#13161f',
+      backgroundColor: '#11141d',
       color: '#e2e8f0',
-      fontSize: '13.5px',
-      fontFamily: '"JetBrains Mono", "Fira Code", ui-monospace, monospace',
+      fontSize: '14.5px',
+      fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    },
+    '.cm-scroller': {
+      overflow: 'auto',
     },
     '.cm-content': {
-      padding: '14px 16px',
+      maxWidth: '820px',
+      margin: '0 auto',
+      padding: '24px 28px 64px',
+      lineHeight: '1.7',
       caretColor: '#60a5fa',
     },
-    '.cm-gutters': {
-      backgroundColor: '#10131b',
-      color: '#64748b',
-      borderRight: '1px solid #232836',
+    '.cm-line': {
+      padding: '1px 0',
     },
     '.cm-activeLine': {
-      backgroundColor: '#1b2030',
+      backgroundColor: 'rgba(59, 130, 246, 0.06)',
+      borderRadius: '4px',
     },
     '.cm-cursor': {
       borderLeftColor: '#60a5fa',
+      borderLeftWidth: '2px',
     },
     '.cm-tooltip.cm-tooltip-autocomplete': {
       backgroundColor: '#1c202b',
@@ -56,121 +60,6 @@ const editorTheme = EditorView.theme(
   },
   { dark: true }
 );
-
-function escapeHtml(raw: string): string {
-  return raw
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function renderMarkdownPreview(
-  source: string,
-  workspaceRoot: string | undefined
-): string {
-  const lines = source.split('\n');
-  const htmlParts: string[] = [];
-  let inCodeBlock = false;
-  let inList = false;
-
-  const closeList = () => {
-    if (inList) {
-      htmlParts.push('</ul>');
-      inList = false;
-    }
-  };
-
-  const formatInline = (text: string): string => {
-    let out = escapeHtml(text);
-    // Images: ![alt](src)
-    out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt, src) => {
-      const trimmedSrc = String(src).trim();
-      const resolvedSrc =
-        trimmedSrc.startsWith('http://') ||
-        trimmedSrc.startsWith('https://') ||
-        trimmedSrc.startsWith('data:')
-          ? trimmedSrc
-          : safeConvertFileSrc(
-              workspaceRoot && !trimmedSrc.startsWith('/')
-                ? `${workspaceRoot}/${trimmedSrc.replace(/^\.\//, '')}`
-                : trimmedSrc
-            );
-      return `<img src="${escapeHtml(resolvedSrc)}" alt="${escapeHtml(
-        String(alt)
-      )}" class="md-preview-img" />`;
-    });
-    // Links: [label](url)
-    out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label, url) => {
-      return `<a href="${escapeHtml(String(url))}" target="_blank" rel="noreferrer" class="md-ext-link">${label}</a>`;
-    });
-    // Wikilinks: [[target]] or [[target|alias]]
-    out = out.replace(/\[\[([^\]]+)\]\]/g, (_m, inner) => {
-      const parts = String(inner).split('|');
-      const target = parts[0]?.trim() ?? '';
-      const label = (parts[1] ?? parts[0] ?? '').trim();
-      return `<button type="button" class="md-wikilink" data-wikilink="${escapeHtml(
-        target
-      )}">[[${escapeHtml(label)}]]</button>`;
-    });
-    // Inline code
-    out = out.replace(/`([^`]+)`/g, '<code class="md-inline-code">$1</code>');
-    // Bold & italic
-    out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-    return out;
-  };
-
-  for (const line of lines) {
-    if (line.trim().startsWith('```')) {
-      closeList();
-      if (!inCodeBlock) {
-        inCodeBlock = true;
-        htmlParts.push('<pre class="md-code-block"><code>');
-      } else {
-        inCodeBlock = false;
-        htmlParts.push('</code></pre>');
-      }
-      continue;
-    }
-
-    if (inCodeBlock) {
-      htmlParts.push(`${escapeHtml(line)}\n`);
-      continue;
-    }
-
-    const headingMatch = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (headingMatch) {
-      closeList();
-      const level = headingMatch[1].length;
-      htmlParts.push(`<h${level} class="md-h${level}">${formatInline(headingMatch[2])}</h${level}>`);
-      continue;
-    }
-
-    const listMatch = /^\s*[-*]\s+(.*)$/.exec(line);
-    if (listMatch) {
-      if (!inList) {
-        htmlParts.push('<ul class="md-list">');
-        inList = true;
-      }
-      htmlParts.push(`<li>${formatInline(listMatch[1])}</li>`);
-      continue;
-    }
-
-    closeList();
-    if (line.trim() === '') {
-      htmlParts.push('<div class="md-spacer"></div>');
-    } else {
-      htmlParts.push(`<p class="md-p">${formatInline(line)}</p>`);
-    }
-  }
-
-  closeList();
-  if (inCodeBlock) {
-    htmlParts.push('</code></pre>');
-  }
-  return htmlParts.join('\n');
-}
 
 export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> = ({
   params,
@@ -185,7 +74,6 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
   const requestOpenPanel = useWorkspaceStore((s) => s.requestOpenPanel);
   const refreshFileTree = useWorkspaceStore((s) => s.refreshFileTree);
 
-  const [viewMode, setViewMode] = useState<ViewMode>('split');
   const [content, setContent] = useState<string>('');
   const [savedContent, setSavedContent] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -202,6 +90,8 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
   const savedContentRef = useRef<string>('');
   const currentContentRef = useRef<string>('');
   const isDirtyRef = useRef<boolean>(false);
+  const workspaceRootRef = useRef<string | undefined>(workspace?.root_path);
+  workspaceRootRef.current = workspace?.root_path;
 
   const markdownIndex = useMemo(() => buildMarkdownIndex(fileTree), [fileTree]);
   const markdownIndexRef = useRef(markdownIndex);
@@ -269,13 +159,32 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
   const handleSaveRef = useRef(handleSave);
   handleSaveRef.current = handleSave;
 
+  const handleWikilinkClick = useCallback(
+    (rawTarget: string) => {
+      setCollisionChoices(null);
+      setMissingTarget(null);
+      const resolution = resolveWikilink(markdownIndexRef.current, rawTarget, relPath);
+      if (resolution.status === 'resolved') {
+        const title = resolution.relPath.split('/').pop() ?? resolution.relPath;
+        requestOpenPanel('markdown', title, { relPath: resolution.relPath });
+      } else if (resolution.status === 'collision') {
+        setCollisionChoices(resolution.matches);
+      } else {
+        setMissingTarget(resolution.suggestedRelPath);
+      }
+    },
+    [relPath, requestOpenPanel]
+  );
+
+  const handleWikilinkClickRef = useRef(handleWikilinkClick);
+  handleWikilinkClickRef.current = handleWikilinkClick;
+
   // Listen to external FS changes
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listenEvent<FsChangedPayload>('fs://changed', (payload) => {
       if (payload.rel_path !== relPath) return;
       if (payload.sha256 && payload.sha256 === savedSha256Ref.current) {
-        // Echo suppression
         return;
       }
       if (!isDirtyRef.current) {
@@ -291,9 +200,9 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
     };
   }, [relPath, loadFromDisk]);
 
-  // Initialize CodeMirror editor
+  // Initialize unified Obsidian-style Live Preview CodeMirror editor
   useEffect(() => {
-    if (!editorContainerRef.current || viewMode === 'preview') return;
+    if (isLoading || !editorContainerRef.current) return;
     if (editorViewRef.current) {
       editorViewRef.current.destroy();
       editorViewRef.current = null;
@@ -317,11 +226,14 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
     const startState = EditorState.create({
       doc: currentContentRef.current,
       extensions: [
-        lineNumbers(),
         highlightActiveLine(),
         markdown(),
         editorTheme,
         EditorView.lineWrapping,
+        createMarkdownLivePreviewExtension(
+          () => workspaceRootRef.current,
+          (target) => handleWikilinkClickRef.current(target)
+        ),
         autocompleteCompartment.current.of(
           autocompletion({ override: [wikilinkCompletionSource] })
         ),
@@ -354,24 +266,7 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
       view.destroy();
       editorViewRef.current = null;
     };
-  }, [viewMode, relPath]);
-
-  const handleWikilinkClick = useCallback(
-    (rawTarget: string) => {
-      setCollisionChoices(null);
-      setMissingTarget(null);
-      const resolution = resolveWikilink(markdownIndex, rawTarget, relPath);
-      if (resolution.status === 'resolved') {
-        const title = resolution.relPath.split('/').pop() ?? resolution.relPath;
-        requestOpenPanel('markdown', title, { relPath: resolution.relPath });
-      } else if (resolution.status === 'collision') {
-        setCollisionChoices(resolution.matches);
-      } else {
-        setMissingTarget(resolution.suggestedRelPath);
-      }
-    },
-    [markdownIndex, relPath, requestOpenPanel]
-  );
+  }, [isLoading, relPath]);
 
   const handleCreateMissingNote = useCallback(async () => {
     if (!missingTarget) return;
@@ -381,22 +276,6 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
     setMissingTarget(null);
     requestOpenPanel('markdown', `${title}.md`, { relPath: missingTarget });
   }, [missingTarget, refreshFileTree, requestOpenPanel]);
-
-  const previewHtml = useMemo(
-    () => renderMarkdownPreview(content, workspace?.root_path),
-    [content, workspace?.root_path]
-  );
-
-  const handlePreviewClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement;
-    const btn = target.closest<HTMLElement>('[data-wikilink]');
-    if (btn) {
-      const linkTarget = btn.getAttribute('data-wikilink');
-      if (linkTarget) {
-        handleWikilinkClick(linkTarget);
-      }
-    }
-  };
 
   return (
     <div className="panel-shell">
@@ -408,18 +287,6 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
           {isDirty && <span className="dirty-pill">Modificado</span>}
         </div>
         <div className="panel-toolbar-right">
-          <div className="segmented-control">
-            {(['editor', 'split', 'preview'] as ViewMode[]).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                className={viewMode === mode ? 'seg-btn active' : 'seg-btn'}
-                onClick={() => setViewMode(mode)}
-              >
-                {mode === 'editor' ? t('md.editor') : mode === 'split' ? t('md.split') : t('md.preview')}
-              </button>
-            ))}
-          </div>
           <button
             type="button"
             className="btn-primary-sm"
@@ -452,7 +319,7 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
 
       {collisionChoices && (
         <div className="banner-info">
-          <span>Múltiplas notas encontradas para este wikilink:</span>
+          <span>{t('md.collisionTitle', { target: '' })}</span>
           <div className="banner-actions">
             {collisionChoices.map((choice) => (
               <button
@@ -474,7 +341,7 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
               className="btn-ghost-sm"
               onClick={() => setCollisionChoices(null)}
             >
-              Fechar
+              {t('md.cancel')}
             </button>
           </div>
         </div>
@@ -498,7 +365,7 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
               className="btn-ghost-sm"
               onClick={() => setMissingTarget(null)}
             >
-              Cancelar
+              {t('md.cancel')}
             </button>
           </div>
         </div>
@@ -507,19 +374,10 @@ export const MarkdownPanel: React.FC<IDockviewPanelProps<MarkdownPanelParams>> =
       {errorMsg && <div className="banner-error">{errorMsg}</div>}
 
       {isLoading ? (
-        <div className="panel-empty">Carregando {relPath}...</div>
+        <div className="panel-empty">{t('md.loading', { path: relPath })}</div>
       ) : (
-        <div className={`markdown-body mode-${viewMode}`}>
-          {viewMode !== 'preview' && (
-            <div ref={editorContainerRef} className="markdown-editor-pane" />
-          )}
-          {viewMode !== 'editor' && (
-            <div
-              className="markdown-preview-pane"
-              onClick={handlePreviewClick}
-              dangerouslySetInnerHTML={{ __html: previewHtml }}
-            />
-          )}
+        <div className="markdown-body">
+          <div ref={editorContainerRef} className="markdown-editor-pane cm-live-preview" />
         </div>
       )}
     </div>
