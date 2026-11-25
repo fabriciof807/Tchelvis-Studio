@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { resetMockPiSetup } from '../types/ipc';
+import { ipc, resetMockPiSetup } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
 
 describe('Pi Durable first-run provider setup', () => {
@@ -81,5 +81,40 @@ describe('Pi Durable first-run provider setup', () => {
     expect(status.needs_setup).toBe(false);
     expect(status.provider_ready).toBe(false);
     expect(useWorkspaceStore.getState().piSetupOpen).toBe(false);
+  });
+
+  it('piListModels falls back to curated suggestions until a provider is connected, then lists its models', async () => {
+    const before = await ipc.piListModels();
+    expect(before.source).toBe('curated');
+    expect(before.fallback_reason).not.toBeNull();
+    expect(
+      before.models.some((m) => m.provider === 'opencode-go' && m.id === 'deepseek-v4.1-flash')
+    ).toBe(true);
+    for (const m of before.models) {
+      expect(Object.keys(m).sort()).toEqual(
+        [
+          'context_window',
+          'cost_in',
+          'cost_out',
+          'id',
+          'image_input',
+          'max_output',
+          'name',
+          'provider',
+          'reasoning',
+        ]
+      );
+    }
+
+    await ipc.piConfigureProvider({
+      provider: 'openrouter',
+      api_key: 'sk-test-mock-123',
+      mark_completed: true,
+    });
+    const after = await ipc.piListModels();
+    expect(after.source).toBe('pi_rpc');
+    expect(after.fallback_reason).toBeNull();
+    expect(after.models.length).toBeGreaterThan(0);
+    expect(after.models.every((m) => m.provider === 'openrouter')).toBe(true);
   });
 });

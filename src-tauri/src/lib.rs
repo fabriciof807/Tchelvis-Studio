@@ -19,7 +19,7 @@ use preview::PreviewManager;
 use pty::PtyManager;
 use sidecar::{
     create_pi_adapter, list_lenses, publish_lens, read_lens_html, ControlSocket,
-    DefaultTchelvisAdapter, PiSidecarAdapter, TchelvisAdapter,
+    DefaultTchelvisAdapter, PiCancelToken, PiSidecarAdapter, TchelvisAdapter,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -29,7 +29,7 @@ use types::{
     CaptureSaved, DispatchLoopOptions, FileTreeNode, FlowBridgeCallbackPayload,
     FlowGenerationResult, GlobalConfig, LensInfo, LoopCheckResult, LoopRunState, LoopWorkflowInfo,
     MarkdownFilePayload, MergeCheckResult, MergeResult, PiAuthCheckResult,
-    PiConfigureProviderRequest, PiSetupStatus, PiTurnAck, PreviewStatus, ProjectConfig,
+    PiConfigureProviderRequest, PiModelCatalog, PiSetupStatus, PiTurnAck, PreviewStatus, ProjectConfig,
     RecentWorkspace, UpdateApplyResult, UpdateCheckResult, WorkspaceInfo, WriteMarkdownResult,
 };
 
@@ -42,6 +42,8 @@ pub struct AppState {
     pub loop_state_cache: Mutex<LoopStateCache>,
     pub pty_manager: PtyManager,
     pub pi_adapter: Mutex<Box<dyn PiSidecarAdapter>>,
+    /// Stops a running turn without waiting for `pi_adapter`, which the turn holds for its whole length.
+    pub pi_cancel: PiCancelToken,
     pub tchelvis: Box<dyn TchelvisAdapter>,
     pub preview_manager: Mutex<PreviewManager>,
     pub compositor: Box<dyn CompositorAdapter>,
@@ -53,7 +55,8 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(global_config: GlobalConfig) -> Self {
-        let pi_adapter = create_pi_adapter(&global_config.sidecar.dpi_backend_bin);
+        let pi_cancel = PiCancelToken::default();
+        let pi_adapter = create_pi_adapter(&global_config.sidecar.dpi_backend_bin, &pi_cancel);
         let tchelvis = Box::new(DefaultTchelvisAdapter {
             bin_name: global_config.sidecar.tchelvis_bin.clone(),
         });
@@ -71,6 +74,7 @@ impl AppState {
             loop_state_cache: Mutex::new(LoopStateCache::default()),
             pty_manager: PtyManager::new(),
             pi_adapter: Mutex::new(pi_adapter),
+            pi_cancel,
             tchelvis,
             preview_manager: Mutex::new(PreviewManager::new()),
             compositor,
@@ -106,15 +110,23 @@ impl AppState {
     }
 }
 
+impl AppState {
+    /// Cancels any running turn first, so this never blocks behind it on the adapter lock.
+    pub fn shutdown_pi(&self) {
+        self.pi_cancel.cancel();
+        if let Ok(mut pi) = self.pi_adapter.lock() {
+            pi.shutdown();
+        }
+    }
+}
+
 impl Drop for AppState {
     fn drop(&mut self) {
         if let Ok(mut pm) = self.preview_manager.lock() {
             pm.stop();
         }
         self.pty_manager.kill_all();
-        if let Ok(mut pi) = self.pi_adapter.lock() {
-            pi.shutdown();
-        }
+        self.shutdown_pi();
         if let Ok(root_guard) = self.workspace_root.lock() {
             if let Some(root) = root_guard.as_ref() {
                 workspace::release_workspace_lock(root);
@@ -136,9 +148,7 @@ pub fn cmd_open_workspace(state: &AppState, path: String) -> Result<WorkspaceInf
         pm.stop();
     }
     state.pty_manager.kill_all();
-    if let Ok(mut pi) = state.pi_adapter.lock() {
-        pi.shutdown();
-    }
+    state.shutdown_pi();
     if let Ok(mut w) = state.watcher.lock() {
         *w = None;
     }
@@ -322,11 +332,16 @@ pub fn cmd_pi_configure_provider(
     if status.pi_available {
         if let Ok(mut pi) = state.pi_adapter.lock() {
             if pi.mode() == "offline" {
-                *pi = create_pi_adapter(&bin_name);
+                *pi = create_pi_adapter(&bin_name, &state.pi_cancel);
             }
         }
     }
     Ok(status)
+}
+
+pub fn cmd_pi_list_models(state: &AppState) -> Result<PiModelCatalog, String> {
+    let bin_name = configured_pi_bin_name(state);
+    sidecar::list_pi_models(&bin_name)
 }
 
 pub fn cmd_pi_logout_provider(state: &AppState, provider: String) -> Result<PiSetupStatus, String> {
@@ -783,41 +798,58 @@ mod desktop_ipc {
         cmd_pty_kill(&state, session_id)
     }
 
+    /// Runs blocking work on Tauri's blocking pool. Synchronous `#[tauri::command]`s execute inline
+    /// on the IPC (main) thread, so slow pi calls there would freeze the whole window.
+    pub(crate) async fn on_worker<T, F>(f: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, String> + Send + 'static,
+    {
+        tauri::async_runtime::spawn_blocking(f)
+            .await
+            .map_err(|e| format!("background task failed: {e}"))?
+    }
+
     #[tauri::command]
-    pub fn pi_send_message(
-        state: State<'_, AppState>,
+    pub async fn pi_send_message(
+        app: tauri::AppHandle,
         envelope: AmbientEnvelope,
     ) -> Result<PiTurnAck, String> {
-        cmd_pi_send_message(&state, envelope)
+        on_worker(move || cmd_pi_send_message(&app.state::<AppState>(), envelope)).await
     }
 
     #[tauri::command]
-    pub fn pi_get_setup_status(state: State<'_, AppState>) -> Result<PiSetupStatus, String> {
-        cmd_pi_get_setup_status(&state)
+    pub async fn pi_get_setup_status(app: tauri::AppHandle) -> Result<PiSetupStatus, String> {
+        on_worker(move || cmd_pi_get_setup_status(&app.state::<AppState>())).await
     }
 
     #[tauri::command]
-    pub fn pi_check_provider(
-        state: State<'_, AppState>,
+    pub async fn pi_list_models(app: tauri::AppHandle) -> Result<PiModelCatalog, String> {
+        on_worker(move || cmd_pi_list_models(&app.state::<AppState>())).await
+    }
+
+    #[tauri::command]
+    pub async fn pi_check_provider(
+        app: tauri::AppHandle,
         provider: String,
     ) -> Result<PiAuthCheckResult, String> {
-        cmd_pi_check_provider(&state, provider)
+        on_worker(move || cmd_pi_check_provider(&app.state::<AppState>(), provider)).await
     }
 
     #[tauri::command]
-    pub fn pi_configure_provider(
-        state: State<'_, AppState>,
+    pub async fn pi_configure_provider(
+        app: tauri::AppHandle,
         req: PiConfigureProviderRequest,
     ) -> Result<PiSetupStatus, String> {
-        cmd_pi_configure_provider(&state, req)
+        on_worker(move || cmd_pi_configure_provider(&app.state::<AppState>(), req)).await
     }
 
     #[tauri::command]
-    pub fn pi_logout_provider(
-        state: State<'_, AppState>,
+    pub async fn pi_logout_provider(
+        app: tauri::AppHandle,
         provider: String,
     ) -> Result<PiSetupStatus, String> {
-        cmd_pi_logout_provider(&state, provider)
+        on_worker(move || cmd_pi_logout_provider(&app.state::<AppState>(), provider)).await
     }
 
     #[tauri::command]
@@ -982,9 +1014,7 @@ mod desktop_ipc {
         if let Ok(mut pm) = state.preview_manager.lock() {
             pm.stop();
         }
-        if let Ok(mut pi) = state.pi_adapter.lock() {
-            pi.shutdown();
-        }
+        state.shutdown_pi();
         if let Ok(mut w) = state.watcher.lock() {
             *w = None;
         }
@@ -1229,6 +1259,7 @@ mod desktop_ipc {
                 pty_kill,
                 pi_send_message,
                 pi_get_setup_status,
+                pi_list_models,
                 pi_check_provider,
                 pi_configure_provider,
                 pi_logout_provider,
@@ -1272,6 +1303,25 @@ mod desktop_ipc {
     }
 }
 
+#[cfg(all(test, feature = "desktop"))]
+mod desktop_ipc_tests {
+    use super::desktop_ipc::on_worker;
+
+    #[test]
+    fn on_worker_runs_off_the_calling_thread_and_returns_its_result() {
+        let caller = std::thread::current().id();
+        let (worker, value) = tauri::async_runtime::block_on(on_worker(move || {
+            Ok::<_, String>((std::thread::current().id(), 42))
+        }))
+        .unwrap();
+        assert_ne!(worker, caller);
+        assert_eq!(value, 42);
+
+        let err = tauri::async_runtime::block_on(on_worker(|| Err::<(), _>("boom".to_string())));
+        assert_eq!(err.unwrap_err(), "boom");
+    }
+}
+
 #[cfg(feature = "desktop")]
 pub use desktop_ipc::run_desktop;
 
@@ -1280,6 +1330,65 @@ mod tests {
     use super::*;
     use crate::types::ActiveContext;
     use tempfile::TempDir;
+
+    #[test]
+    fn open_workspace_does_not_wait_behind_a_running_pi_turn() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+
+        let dir = TempDir::new().unwrap();
+        let ws = dir.path().join("ws");
+        let pi_agent_dir = dir.path().join("pi-agent");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&pi_agent_dir).unwrap();
+        let started = dir.path().join("started");
+        let fake_pi = dir.path().join("pi");
+        std::fs::write(
+            &fake_pi,
+            format!("#!/usr/bin/env bash\ntouch '{}'\nexec sleep 30\n", started.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let state = AppState::new(GlobalConfig::default());
+        cmd_open_workspace(&state, ws.display().to_string()).unwrap();
+        *state.pi_adapter.lock().unwrap() = Box::new(
+            sidecar::ProcessPiAdapter::with_agent_dir(fake_pi, pi_agent_dir)
+                .with_cancel_token(state.pi_cancel.clone()),
+        );
+
+        std::thread::scope(|scope| {
+            let turn = scope.spawn(|| {
+                cmd_pi_send_message(
+                    &state,
+                    AmbientEnvelope {
+                        user_message: "long turn".to_string(),
+                        active_context: ActiveContext {
+                            focused_panel: "chat".to_string(),
+                            open_tabs: vec![],
+                            dirty_files: vec![],
+                            latest_loop: None,
+                        },
+                        one_shot_attachments: vec![],
+                    },
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !started.exists() {
+                assert!(Instant::now() < deadline, "fake pi never started");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            let switching = Instant::now();
+            cmd_open_workspace(&state, ws.display().to_string()).unwrap();
+            assert!(
+                switching.elapsed() < Duration::from_secs(5),
+                "open_workspace waited {:?} behind the running turn",
+                switching.elapsed()
+            );
+            assert!(turn.join().unwrap().unwrap_err().contains("cancel"));
+        });
+    }
 
     #[test]
     fn end_to_end_ipc_flow_without_desktop_feature() {

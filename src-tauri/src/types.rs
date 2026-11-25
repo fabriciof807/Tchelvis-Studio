@@ -506,6 +506,32 @@ pub struct PiSetupStatus {
     pub available_models: Vec<String>,
 }
 
+/// One model pi can use. Deliberately omits `baseUrl`, headers and any credential material.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PiModelInfo {
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+    pub reasoning: bool,
+    pub image_input: bool,
+    pub context_window: Option<u64>,
+    pub max_output: Option<u64>,
+    /// USD per million input tokens, when pi knows it.
+    pub cost_in: Option<f64>,
+    /// USD per million output tokens, when pi knows it.
+    pub cost_out: Option<f64>,
+}
+
+/// Result of `pi_list_models`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PiModelCatalog {
+    /// Where the list came from: `pi_rpc`, `models_store` or `curated`.
+    pub source: String,
+    pub models: Vec<PiModelInfo>,
+    /// Why the preferred source (`pi_rpc`) was not used; `None` when it was.
+    pub fallback_reason: Option<String>,
+}
+
 /// Request payload for `pi_configure_provider`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(default)]

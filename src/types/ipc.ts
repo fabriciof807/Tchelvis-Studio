@@ -176,6 +176,28 @@ export interface PiSetupStatus {
   available_models: string[];
 }
 
+/** One model pi can use. Never carries base URLs, headers or credentials. */
+export interface PiModelInfo {
+  provider: string;
+  id: string;
+  name: string;
+  reasoning: boolean;
+  image_input: boolean;
+  context_window: number | null;
+  max_output: number | null;
+  /** USD per million input tokens. */
+  cost_in: number | null;
+  /** USD per million output tokens. */
+  cost_out: number | null;
+}
+
+export interface PiModelCatalog {
+  source: 'pi_rpc' | 'models_store' | 'curated' | string;
+  models: PiModelInfo[];
+  /** Why `pi_rpc` was not used; null when it was. */
+  fallback_reason: string | null;
+}
+
 export interface PiConfigureProviderRequest {
   provider: string;
   model?: string | null;
@@ -1260,6 +1282,13 @@ export const ipc = {
     return loadMockPiSetup();
   },
 
+  async piListModels(): Promise<PiModelCatalog> {
+    if (isTauriEnv()) {
+      return invoke<PiModelCatalog>('pi_list_models');
+    }
+    return mockPiModelCatalog(loadMockPiSetup());
+  },
+
   async piCheckProvider(provider: string): Promise<PiAuthCheckResult> {
     if (isTauriEnv()) {
       return invoke<PiAuthCheckResult>('pi_check_provider', { provider });
@@ -1430,6 +1459,37 @@ function defaultMockPiSetup(): PiSetupStatus {
     configured_providers: [],
     providers,
     available_models: [],
+  };
+}
+
+function mockModelInfo(provider: string, id: string): PiModelInfo {
+  return {
+    provider,
+    id,
+    name: id,
+    reasoning: false,
+    image_input: false,
+    context_window: null,
+    max_output: null,
+    cost_in: null,
+    cost_out: null,
+  };
+}
+
+/** Mirrors the Rust fallback chain: connected providers answer like pi RPC, otherwise curated suggestions. */
+function mockPiModelCatalog(status: PiSetupStatus): PiModelCatalog {
+  const connected = status.providers.filter((p) => p.configured);
+  if (connected.length > 0) {
+    return {
+      source: 'pi_rpc',
+      models: connected.flatMap((p) => p.suggested_models.map((id) => mockModelInfo(p.id, id))),
+      fallback_reason: null,
+    };
+  }
+  return {
+    source: 'curated',
+    models: status.providers.flatMap((p) => p.suggested_models.map((id) => mockModelInfo(p.id, id))),
+    fallback_reason: 'pi reported no models (is a provider connected?)',
   };
 }
 
