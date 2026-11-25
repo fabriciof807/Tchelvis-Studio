@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { ipc, listenEvent, type PtyOutputPayload } from '../types/ipc';
+import { useWorkspaceStore } from '../store/workspaceStore';
 
 interface TerminalPanelProps {
   visible?: boolean;
@@ -13,6 +14,10 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = memo(({ visible = tru
   const sessionIdRef = useRef<string | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const pendingTerminalCommand = useWorkspaceStore((s) => s.pendingTerminalCommand);
+  const consumePendingTerminalCommand = useWorkspaceStore(
+    (s) => s.consumePendingTerminalCommand
+  );
 
   useEffect(() => {
     const container = containerRef.current;
@@ -89,6 +94,11 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = memo(({ visible = tru
           }
         }
         earlyChunks.length = 0;
+
+        const pendingCmd = useWorkspaceStore.getState().consumePendingTerminalCommand();
+        if (pendingCmd) {
+          void ipc.ptyWrite(sid, pendingCmd);
+        }
       } catch (err) {
         term.writeln(`\r\n[Erro ao iniciar PTY: ${err instanceof Error ? err.message : String(err)}]`);
       }
@@ -155,6 +165,15 @@ export const TerminalPanel: React.FC<TerminalPanelProps> = memo(({ visible = tru
     });
     return () => window.cancelAnimationFrame(raf);
   }, [visible]);
+
+  useEffect(() => {
+    if (!pendingTerminalCommand || !sessionIdRef.current) return;
+    const cmd = consumePendingTerminalCommand();
+    if (cmd) {
+      void ipc.ptyWrite(sessionIdRef.current, cmd);
+      termRef.current?.focus();
+    }
+  }, [pendingTerminalCommand, consumePendingTerminalCommand]);
 
   return (
     <div

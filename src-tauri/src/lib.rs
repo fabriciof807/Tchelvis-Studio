@@ -26,10 +26,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use types::{
     AmbientEnvelope, BrowserBounds, BrowserPanelState, BrowserSnapshotResult, CaptureResult,
-    CaptureSaved, FileTreeNode, FlowBridgeCallbackPayload, FlowGenerationResult, GlobalConfig,
-    LensInfo, LoopRunState, MarkdownFilePayload, MergeCheckResult, MergeResult, PiTurnAck,
-    PreviewStatus, ProjectConfig, RecentWorkspace, UpdateApplyResult, UpdateCheckResult,
-    WorkspaceInfo, WriteMarkdownResult,
+    CaptureSaved, DispatchLoopOptions, FileTreeNode, FlowBridgeCallbackPayload,
+    FlowGenerationResult, GlobalConfig, LensInfo, LoopCheckResult, LoopRunState, LoopWorkflowInfo,
+    MarkdownFilePayload, MergeCheckResult, MergeResult, PiAuthCheckResult,
+    PiConfigureProviderRequest, PiSetupStatus, PiTurnAck, PreviewStatus, ProjectConfig,
+    RecentWorkspace, UpdateApplyResult, UpdateCheckResult, WorkspaceInfo, WriteMarkdownResult,
 };
 
 /// Shared microkernel state used by both headless tests and Tauri desktop IPC.
@@ -294,6 +295,45 @@ pub fn cmd_pi_send_message(
     pi.send_message(&root, &envelope)
 }
 
+fn configured_pi_bin_name(state: &AppState) -> String {
+    state
+        .global_config
+        .lock()
+        .map(|c| c.sidecar.dpi_backend_bin.clone())
+        .unwrap_or_else(|_| "pi".to_string())
+}
+
+pub fn cmd_pi_get_setup_status(state: &AppState) -> Result<PiSetupStatus, String> {
+    let bin_name = configured_pi_bin_name(state);
+    sidecar::get_pi_setup_status(&bin_name)
+}
+
+pub fn cmd_pi_check_provider(state: &AppState, provider: String) -> Result<PiAuthCheckResult, String> {
+    let bin_name = configured_pi_bin_name(state);
+    sidecar::check_pi_provider(&bin_name, &provider)
+}
+
+pub fn cmd_pi_configure_provider(
+    state: &AppState,
+    req: PiConfigureProviderRequest,
+) -> Result<PiSetupStatus, String> {
+    let bin_name = configured_pi_bin_name(state);
+    let status = sidecar::configure_pi_provider(&bin_name, &req)?;
+    if status.pi_available {
+        if let Ok(mut pi) = state.pi_adapter.lock() {
+            if pi.mode() == "offline" {
+                *pi = create_pi_adapter(&bin_name);
+            }
+        }
+    }
+    Ok(status)
+}
+
+pub fn cmd_pi_logout_provider(state: &AppState, provider: String) -> Result<PiSetupStatus, String> {
+    let bin_name = configured_pi_bin_name(state);
+    sidecar::logout_pi_provider(&bin_name, &provider)
+}
+
 pub fn cmd_save_capture(
     state: &AppState,
     filename: String,
@@ -328,6 +368,22 @@ pub fn cmd_publish_lens(
     publish_lens(&root, &lens_id, &title, &html_content)
 }
 
+pub fn cmd_list_loop_workflows(state: &AppState) -> Result<Vec<LoopWorkflowInfo>, String> {
+    let root = state.active_root()?;
+    state.tchelvis.list_workflows(&root)
+}
+
+pub fn cmd_check_loop(
+    state: &AppState,
+    workflow: String,
+    use_overrides: Option<Vec<String>>,
+) -> Result<LoopCheckResult, String> {
+    let root = state.active_root()?;
+    state
+        .tchelvis
+        .check_loop(&root, &workflow, &use_overrides.unwrap_or_default())
+}
+
 pub fn cmd_list_loop_runs(state: &AppState) -> Result<Vec<LoopRunState>, String> {
     let root = state.active_root()?;
     let mut cache = state
@@ -347,11 +403,21 @@ pub fn cmd_dispatch_loop(
     workflow: String,
     title: String,
     spec_markdown: String,
-) -> Result<String, String> {
+    options: Option<DispatchLoopOptions>,
+) -> Result<LoopRunState, String> {
     let root = state.active_root()?;
-    state
-        .tchelvis
-        .dispatch_loop(&root, &workflow, &title, &spec_markdown)
+    state.tchelvis.dispatch_loop(
+        &root,
+        &workflow,
+        &title,
+        &spec_markdown,
+        &options.unwrap_or_default(),
+    )
+}
+
+pub fn cmd_stop_loop(state: &AppState, run_id: String) -> Result<(), String> {
+    let root = state.active_root()?;
+    state.tchelvis.stop_loop(&root, &run_id)
 }
 
 pub fn cmd_preview_start(
@@ -592,9 +658,30 @@ mod desktop_ipc {
         let _ = app.fs_scope().allow_directory(&root, true);
         let _ = app.asset_protocol_scope().allow_directory(&root, true);
 
+        let root_for_emit = root.clone();
         let app_handle = app.clone();
         let watcher = WorkspaceWatcher::start(root, Arc::clone(&state.echo_cache), move |paths| {
-            let _ = app_handle.emit("fs://changed", paths);
+            let mut loops_updated = false;
+            for rel_path in paths {
+                if rel_path.starts_with(".loops/") {
+                    loops_updated = true;
+                }
+                let kind = if root_for_emit.join(&rel_path).exists() {
+                    "modify"
+                } else {
+                    "remove"
+                };
+                let _ = app_handle.emit(
+                    "fs://changed",
+                    serde_json::json!({
+                        "rel_path": rel_path,
+                        "kind": kind,
+                    }),
+                );
+            }
+            if loops_updated {
+                let _ = app_handle.emit("loops://updated", ());
+            }
         })?;
         if let Ok(mut w) = state.watcher.lock() {
             *w = Some(watcher);
@@ -705,6 +792,35 @@ mod desktop_ipc {
     }
 
     #[tauri::command]
+    pub fn pi_get_setup_status(state: State<'_, AppState>) -> Result<PiSetupStatus, String> {
+        cmd_pi_get_setup_status(&state)
+    }
+
+    #[tauri::command]
+    pub fn pi_check_provider(
+        state: State<'_, AppState>,
+        provider: String,
+    ) -> Result<PiAuthCheckResult, String> {
+        cmd_pi_check_provider(&state, provider)
+    }
+
+    #[tauri::command]
+    pub fn pi_configure_provider(
+        state: State<'_, AppState>,
+        req: PiConfigureProviderRequest,
+    ) -> Result<PiSetupStatus, String> {
+        cmd_pi_configure_provider(&state, req)
+    }
+
+    #[tauri::command]
+    pub fn pi_logout_provider(
+        state: State<'_, AppState>,
+        provider: String,
+    ) -> Result<PiSetupStatus, String> {
+        cmd_pi_logout_provider(&state, provider)
+    }
+
+    #[tauri::command]
     pub fn save_capture(
         state: State<'_, AppState>,
         filename: String,
@@ -734,6 +850,20 @@ mod desktop_ipc {
     }
 
     #[tauri::command]
+    pub fn list_loop_workflows(state: State<'_, AppState>) -> Result<Vec<LoopWorkflowInfo>, String> {
+        cmd_list_loop_workflows(&state)
+    }
+
+    #[tauri::command]
+    pub fn check_loop(
+        state: State<'_, AppState>,
+        workflow: String,
+        use_overrides: Option<Vec<String>>,
+    ) -> Result<LoopCheckResult, String> {
+        cmd_check_loop(&state, workflow, use_overrides)
+    }
+
+    #[tauri::command]
     pub fn list_loop_runs(state: State<'_, AppState>) -> Result<Vec<LoopRunState>, String> {
         cmd_list_loop_runs(&state)
     }
@@ -745,12 +875,27 @@ mod desktop_ipc {
 
     #[tauri::command]
     pub fn dispatch_loop(
+        app: tauri::AppHandle,
         state: State<'_, AppState>,
         workflow: String,
         title: String,
         spec_markdown: String,
-    ) -> Result<String, String> {
-        cmd_dispatch_loop(&state, workflow, title, spec_markdown)
+        options: Option<DispatchLoopOptions>,
+    ) -> Result<LoopRunState, String> {
+        let res = cmd_dispatch_loop(&state, workflow, title, spec_markdown, options)?;
+        let _ = app.emit("loops://updated", ());
+        Ok(res)
+    }
+
+    #[tauri::command]
+    pub fn stop_loop(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+        run_id: String,
+    ) -> Result<(), String> {
+        cmd_stop_loop(&state, run_id)?;
+        let _ = app.emit("loops://updated", ());
+        Ok(())
     }
 
     #[tauri::command]
@@ -1083,13 +1228,20 @@ mod desktop_ipc {
                 pty_resize,
                 pty_kill,
                 pi_send_message,
+                pi_get_setup_status,
+                pi_check_provider,
+                pi_configure_provider,
+                pi_logout_provider,
                 save_capture,
                 list_lenses,
                 read_lens_html,
                 publish_lens,
+                list_loop_workflows,
+                check_loop,
                 list_loop_runs,
                 read_loop_report,
                 dispatch_loop,
+                stop_loop,
                 preview_start,
                 preview_stop,
                 preview_capture,
@@ -1172,5 +1324,38 @@ mod tests {
         .unwrap();
         assert_eq!(lens.lens_id, "stats-table");
         assert_eq!(cmd_list_lenses(&state).unwrap().len(), 1);
+
+        let workflows = cmd_list_loop_workflows(&state).unwrap();
+        assert!(workflows.iter().any(|w| w.name == "fast-worker-reviewer"));
+
+        let mut custom_state = AppState::new(GlobalConfig {
+            sidecar: types::SidecarConfig {
+                dpi_backend_bin: "__nonexistent_dpi__".to_string(),
+                tchelvis_bin: "__nonexistent_tchelvis__".to_string(),
+            },
+            ..GlobalConfig::default()
+        });
+        let _ = cmd_open_workspace(&custom_state, dir.path().to_string_lossy().to_string()).unwrap();
+        let check = cmd_check_loop(&custom_state, "fast-worker-reviewer".into(), None).unwrap();
+        assert!(!check.tchelvis_available);
+
+        let dispatched = cmd_dispatch_loop(
+            &custom_state,
+            "fast-worker-reviewer".into(),
+            "Dash".into(),
+            "Implement dash".into(),
+            Some(DispatchLoopOptions {
+                use_overrides: vec!["implement=pi:opencode-go/deepseek-v4.1-flash".into()],
+                max_cycles: Some(2),
+                from_head: true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(dispatched.status, "queued-offline");
+        let runs = cmd_list_loop_runs(&custom_state).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, dispatched.run_id);
+        assert!(cmd_stop_loop(&custom_state, dispatched.run_id).is_err());
+        let _ = &mut custom_state;
     }
 }

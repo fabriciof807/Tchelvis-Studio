@@ -1,3 +1,4 @@
+use crate::fs_watcher::parse_loop_run_state;
 use crate::types::{LoopRunState, MergeCheckResult, MergeResult};
 use std::collections::HashSet;
 use std::fs;
@@ -32,23 +33,112 @@ fn validate_run_id(run_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn branch_exists(workspace_root: &Path, branch: &str) -> bool {
+    let ref_name = format!("refs/heads/{branch}");
+    run_git(workspace_root, &["show-ref", "--verify", "--quiet", &ref_name]).is_ok()
+}
+
+/// Resolves `default_branch`: if `refs/heads/<default_branch>` does not exist,
+/// falls back to the repository's current checked-out branch (`HEAD`).
+pub fn resolve_default_branch(workspace_root: &Path, default_branch: &str) -> Result<String, String> {
+    if !default_branch.trim().is_empty() && branch_exists(workspace_root, default_branch) {
+        return Ok(default_branch.to_string());
+    }
+    let current = run_git(workspace_root, &["rev-parse", "--abbrev-ref", "HEAD"])?
+        .trim()
+        .to_string();
+    if current.is_empty() || current == "HEAD" {
+        return Err(format!(
+            "default branch '{default_branch}' not found and HEAD is detached"
+        ));
+    }
+    Ok(current)
+}
+
+fn read_run_state_if_present(workspace_root: &Path, run_id: &str) -> Option<LoopRunState> {
+    let run_dir = workspace_root.join(".loops/runs").join(run_id);
+    let state_path = run_dir.join("state.json");
+    let raw = fs::read_to_string(&state_path).ok()?;
+    parse_loop_run_state(run_id, &run_dir, &raw).ok()
+}
+
+fn resolve_worktree_and_branch(
+    workspace_root: &Path,
+    run_id: &str,
+) -> Result<(Option<PathBuf>, String), String> {
+    validate_run_id(run_id)?;
+    let state = read_run_state_if_present(workspace_root, run_id);
+
+    let candidate_wt = state
+        .as_ref()
+        .and_then(|s| s.worktree_path.as_ref())
+        .map(|wt| {
+            let p = PathBuf::from(wt);
+            if p.is_absolute() {
+                p
+            } else {
+                workspace_root.join(p)
+            }
+        })
+        .filter(|p| p.exists())
+        .or_else(|| {
+            let wt = workspace_root.join(".loops/worktrees").join(run_id);
+            wt.exists().then_some(wt)
+        })
+        .or_else(|| {
+            let ws = workspace_root
+                .join(".loops/runs")
+                .join(run_id)
+                .join("workspace");
+            ws.exists().then_some(ws)
+        });
+
+    if let Some(wt_path) = candidate_wt {
+        let branch = run_git(&wt_path, &["rev-parse", "--abbrev-ref", "HEAD"])?
+            .trim()
+            .to_string();
+        return Ok((Some(wt_path), branch));
+    }
+
+    if let Some(st) = state {
+        if let Some(branch) = st.branch.filter(|b| !b.trim().is_empty()) {
+            if branch_exists(workspace_root, &branch) {
+                return Ok((None, branch));
+            }
+            return Err(format!(
+                "loop branch '{branch}' for run '{run_id}' does not exist in repository"
+            ));
+        }
+        if !st.workflow.trim().is_empty() {
+            let conventional = format!("loop/{}-{run_id}", st.workflow);
+            if branch_exists(workspace_root, &conventional) {
+                return Ok((None, conventional));
+            }
+        }
+    }
+
+    let fallback_branch = format!("loop/{run_id}");
+    if branch_exists(workspace_root, &fallback_branch) {
+        return Ok((None, fallback_branch));
+    }
+
+    Err(format!(
+        "no worktree or branch found for run '{run_id}'"
+    ))
+}
+
 /// Resolves the worktree path for `run_id` from `.loops/runs/<run_id>/state.json`
 /// or the default `.loops/worktrees/<run_id>`.
 pub fn resolve_worktree_path(workspace_root: &Path, run_id: &str) -> Result<PathBuf, String> {
     validate_run_id(run_id)?;
-    let state_path = workspace_root.join(".loops/runs").join(run_id).join("state.json");
-    if state_path.exists() {
-        if let Ok(raw) = fs::read_to_string(&state_path) {
-            if let Ok(state) = serde_json::from_str::<LoopRunState>(&raw) {
-                if let Some(wt) = state.worktree_path {
-                    let p = PathBuf::from(&wt);
-                    return Ok(if p.is_absolute() {
-                        p
-                    } else {
-                        workspace_root.join(p)
-                    });
-                }
-            }
+    if let Some(state) = read_run_state_if_present(workspace_root, run_id) {
+        if let Some(wt) = state.worktree_path {
+            let p = PathBuf::from(&wt);
+            return Ok(if p.is_absolute() {
+                p
+            } else {
+                workspace_root.join(p)
+            });
         }
     }
     Ok(workspace_root.join(".loops/worktrees").join(run_id))
@@ -68,25 +158,17 @@ fn list_dirty_files(workspace_root: &Path) -> Result<Vec<String>, String> {
     Ok(dirty)
 }
 
-/// Checks whether merging the worktree branch for `run_id` into `default_branch`
+/// Checks whether merging the loop branch/worktree for `run_id` into `default_branch`
 /// collides with uncommitted dirty files in `workspace_root`.
 pub fn check_worktree_merge(
     workspace_root: &Path,
     run_id: &str,
     default_branch: &str,
 ) -> Result<MergeCheckResult, String> {
-    let wt_path = resolve_worktree_path(workspace_root, run_id)?;
-    if !wt_path.exists() {
-        return Err(format!(
-            "worktree path does not exist: {}",
-            wt_path.display()
-        ));
-    }
-    let branch = run_git(&wt_path, &["rev-parse", "--abbrev-ref", "HEAD"])?
-        .trim()
-        .to_string();
+    let target_default = resolve_default_branch(workspace_root, default_branch)?;
+    let (opt_wt, branch) = resolve_worktree_and_branch(workspace_root, run_id)?;
 
-    let range = format!("{default_branch}...{branch}");
+    let range = format!("{target_default}...{branch}");
     let changed_out = run_git(workspace_root, &["diff", "--name-only", &range])?;
     let branch_changed: HashSet<String> = changed_out
         .lines()
@@ -94,29 +176,36 @@ pub fn check_worktree_merge(
         .filter(|l| !l.is_empty())
         .collect();
 
-    let dirty = list_dirty_files(workspace_root)?;
-    let conflicting_dirty_files: Vec<String> = dirty
-        .into_iter()
-        .filter(|f| branch_changed.contains(f))
+    let dirty_files = list_dirty_files(workspace_root)?;
+    let colliding: Vec<String> = dirty_files
+        .iter()
+        .filter(|f| branch_changed.contains(*f))
+        .cloned()
         .collect();
+    let can_merge = colliding.is_empty();
 
     Ok(MergeCheckResult {
-        can_merge: conflicting_dirty_files.is_empty(),
-        conflicting_dirty_files,
-        worktree_path: wt_path.to_string_lossy().to_string(),
+        can_merge,
+        can_merge_cleanly: can_merge,
+        dirty_files,
+        colliding_files: colliding.clone(),
+        conflicting_dirty_files: colliding,
+        requires_stash: !can_merge,
+        worktree_path: opt_wt.map(|p| p.to_string_lossy().to_string()),
         branch,
     })
 }
 
-/// Merges the loop worktree branch into `default_branch`, optionally stashing dirty
-/// colliding files, and removes the worktree only after merge succeeds.
+/// Merges the loop branch/worktree into `default_branch`, optionally stashing dirty
+/// colliding files, and removes any worktree on disk only after merge succeeds.
 pub fn merge_worktree(
     workspace_root: &Path,
     run_id: &str,
     default_branch: &str,
     stash_dirty: bool,
 ) -> Result<MergeResult, String> {
-    let check = check_worktree_merge(workspace_root, run_id, default_branch)?;
+    let target_default = resolve_default_branch(workspace_root, default_branch)?;
+    let check = check_worktree_merge(workspace_root, run_id, &target_default)?;
     if !check.can_merge && !stash_dirty {
         return Ok(MergeResult {
             merged: false,
@@ -139,8 +228,8 @@ pub fn merge_worktree(
     let current_branch = run_git(workspace_root, &["rev-parse", "--abbrev-ref", "HEAD"])?
         .trim()
         .to_string();
-    if current_branch != default_branch {
-        run_git(workspace_root, &["checkout", default_branch])?;
+    if current_branch != target_default {
+        run_git(workspace_root, &["checkout", &target_default])?;
     }
 
     let merge_msg = format!("Merge loop {run_id} ({})", check.branch);
@@ -152,15 +241,16 @@ pub fn merge_worktree(
         if stashed {
             let _ = run_git(workspace_root, &["stash", "pop"]);
         }
-        return Err(format!("merge failed (worktree preserved): {err}"));
+        return Err(format!("merge failed (branch/worktree preserved): {err}"));
     }
 
-    let cleaned_worktree = run_git(
-        workspace_root,
-        &["worktree", "remove", "--force", &check.worktree_path],
-    )
-    .is_ok();
-    let _ = run_git(workspace_root, &["worktree", "prune"]);
+    let cleaned_worktree = if let Some(wt_path) = check.worktree_path.as_deref() {
+        let removed = run_git(workspace_root, &["worktree", "remove", "--force", wt_path]).is_ok();
+        let _ = run_git(workspace_root, &["worktree", "prune"]);
+        removed
+    } else {
+        false
+    };
 
     let mut extra = String::new();
     if stashed {
@@ -173,7 +263,7 @@ pub fn merge_worktree(
         merged: true,
         stashed,
         cleaned_worktree,
-        message: format!("Merged '{}' into '{}'{extra}", check.branch, default_branch),
+        message: format!("Merged '{}' into '{}'{extra}", check.branch, target_default),
     })
 }
 
@@ -293,5 +383,51 @@ mod tests {
 
         cleanup_worktree(repo.path(), "run-orphan").unwrap();
         assert!(list_orphan_worktrees(repo.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn branch_only_loop_merge_and_master_fallback_work() {
+        let repo = TempDir::new().unwrap();
+        run_git(repo.path(), &["init", "-b", "master"]).unwrap();
+        run_git(repo.path(), &["config", "user.email", "test@example.com"]).unwrap();
+        run_git(repo.path(), &["config", "user.name", "Test User"]).unwrap();
+        fs::write(repo.path().join("README.md"), "base\n").unwrap();
+        run_git(repo.path(), &["add", "README.md"]).unwrap();
+        run_git(repo.path(), &["commit", "-m", "initial"]).unwrap();
+
+        let run_id = "20261125-023057-eec8";
+        let loop_branch = format!("loop/fast-worker-reviewer-{run_id}");
+        run_git(repo.path(), &["checkout", "-b", &loop_branch]).unwrap();
+        fs::write(repo.path().join("README.md"), "base\nfrom branch loop\n").unwrap();
+        run_git(repo.path(), &["add", "README.md"]).unwrap();
+        run_git(repo.path(), &["commit", "-m", "loop commit"]).unwrap();
+        run_git(repo.path(), &["checkout", "master"]).unwrap();
+
+        // Write real tchelvis state.json with no worktree on disk
+        let run_dir = repo.path().join(".loops/runs").join(run_id);
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(
+            run_dir.join("state.json"),
+            format!(
+                r#"{{"schema_version":1,"run_id":"{run_id}","workflow":"fast-worker-reviewer","status":"PASS","branch":"{loop_branch}","started_at_ms":1795573858846,"executions":[]}}"#
+            ),
+        )
+        .unwrap();
+
+        // Dirty file collision on master while config says "main" -> falls back to "master"
+        fs::write(repo.path().join("README.md"), "dirty edit\n").unwrap();
+        let check = check_worktree_merge(repo.path(), run_id, "main").unwrap();
+        assert!(!check.can_merge);
+        assert!(!check.can_merge_cleanly);
+        assert!(check.requires_stash);
+        assert_eq!(check.worktree_path, None);
+        assert_eq!(check.branch, loop_branch);
+        assert_eq!(check.colliding_files, vec!["README.md"]);
+
+        let merged = merge_worktree(repo.path(), run_id, "main", true).unwrap();
+        assert!(merged.merged);
+        assert!(merged.stashed);
+        assert!(!merged.cleaned_worktree);
+        assert!(merged.message.contains("into 'master'"));
     }
 }

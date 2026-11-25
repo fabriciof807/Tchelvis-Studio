@@ -9,6 +9,7 @@ import {
   ImageIcon,
   PaperclipIcon,
 } from '../components/Icons';
+import { PiSetupWizard } from '../components/PiSetupWizard';
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -32,11 +33,14 @@ export const ChatPanel: React.FC = memo(() => {
   const oneShotAttachments = useWorkspaceStore((s) => s.oneShotAttachments);
   const isSendingChat = useWorkspaceStore((s) => s.isSendingChat);
   const capturesQuotaExceeded = useWorkspaceStore((s) => s.capturesQuotaExceeded);
+  const piSetupStatus = useWorkspaceStore((s) => s.piSetupStatus);
+  const piSetupOpen = useWorkspaceStore((s) => s.piSetupOpen);
 
   const sendChatMessage = useWorkspaceStore((s) => s.sendChatMessage);
   const addOneShotAttachment = useWorkspaceStore((s) => s.addOneShotAttachment);
   const removeOneShotAttachment = useWorkspaceStore((s) => s.removeOneShotAttachment);
   const setCaptureQuotaStatus = useWorkspaceStore((s) => s.setCaptureQuotaStatus);
+  const setPiSetupOpen = useWorkspaceStore((s) => s.setPiSetupOpen);
 
   const [draft, setDraft] = useState('');
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
@@ -104,6 +108,14 @@ export const ChatPanel: React.FC = memo(() => {
   };
 
   const subagentEntries = Object.entries(subagentStatuses);
+  const providerReady = piSetupStatus?.provider_ready === true;
+  const pillLabel = providerReady
+    ? `${piSetupStatus?.active_provider ?? 'pi'}${
+        piSetupStatus?.active_model ? ` · ${piSetupStatus.active_model}` : ''
+      }`
+    : piSetupStatus?.first_run_completed
+      ? t('piSetup.pillOffline')
+      : t('piSetup.pillConnect');
 
   return (
     <div className="chat-panel">
@@ -111,6 +123,15 @@ export const ChatPanel: React.FC = memo(() => {
         <div className="chat-title-row">
           <span className="chat-title">{t('chat.title')}</span>
           <span className="chat-subtitle">{t('chat.subtitle')}</span>
+          <button
+            type="button"
+            className={`pi-provider-pill ${providerReady ? 'ready' : 'warning'}`}
+            onClick={() => setPiSetupOpen(!piSetupOpen)}
+            title={t('piSetup.settingsConfigureBtn')}
+          >
+            <span className={`pi-status-dot ${providerReady ? 'ready' : 'warning'}`} />
+            <span className="pi-pill-text">{pillLabel}</span>
+          </button>
         </div>
         {dirtyFiles.length > 0 && (
           <div className="dirty-indicator" title={dirtyFiles.join('\n')}>
@@ -118,6 +139,8 @@ export const ChatPanel: React.FC = memo(() => {
           </div>
         )}
       </div>
+
+      {piSetupOpen && <PiSetupWizard />}
 
       {subagentEntries.length > 0 && (
         <div className="subagent-bar">

@@ -29,6 +29,7 @@ import {
   LayersIcon,
   MessageSquareIcon,
   PlayIcon,
+  PlusIcon,
   RefreshIcon,
   RepeatIcon,
   SettingsIcon,
@@ -161,6 +162,7 @@ export const DockManager: React.FC = () => {
   const startPreview = useWorkspaceStore((s) => s.startPreview);
   const setPreviewLightboxOpen = useWorkspaceStore((s) => s.setPreviewLightboxOpen);
   const refreshFileTree = useWorkspaceStore((s) => s.refreshFileTree);
+  const refreshLoopRuns = useWorkspaceStore((s) => s.refreshLoopRuns);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [allFoldersExpanded, setAllFoldersExpanded] = useState(false);
@@ -544,10 +546,40 @@ export const DockManager: React.FC = () => {
             <div className="drawer-section">
               <div className="drawer-header">
                 <span>{t('drawer.loops')}</span>
+                <div className="drawer-header-actions">
+                  <button
+                    type="button"
+                    className="btn-icon-xs"
+                    onClick={() => requestOpenPanel('loops', 'Loops', {})}
+                    title={t('loops.newLoop')}
+                    aria-label={t('loops.newLoop')}
+                  >
+                    <PlusIcon size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-icon-xs"
+                    onClick={() => void refreshLoopRuns()}
+                    title={t('loops.refresh')}
+                    aria-label={t('loops.refresh')}
+                  >
+                    <RefreshIcon size={13} />
+                  </button>
+                </div>
               </div>
               <div className="drawer-scroll">
                 {loopRuns.length === 0 ? (
-                  <div className="drawer-empty">{t('drawer.noLoops')}</div>
+                  <div className="drawer-empty">
+                    <div>{t('drawer.noLoops')}</div>
+                    <button
+                      type="button"
+                      className="btn-primary-sm"
+                      style={{ marginTop: 8 }}
+                      onClick={() => requestOpenPanel('loops', 'Loops', {})}
+                    >
+                      + {t('loops.newLoop')}
+                    </button>
+                  </div>
                 ) : (
                   loopRuns.map((run) => (
                     <button

@@ -94,7 +94,7 @@ impl Default for GlobalConfig {
                 healthcheck_timeout_ms: 10_000,
             },
             sidecar: SidecarConfig {
-                dpi_backend_bin: "dpi-backend".to_string(),
+                dpi_backend_bin: "pi".to_string(),
                 tchelvis_bin: "tchelvis".to_string(),
             },
             image_generation: ImageGenerationConfig::default(),
@@ -169,8 +169,11 @@ pub struct WriteMarkdownResult {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LatestLoopRef {
     pub run_id: String,
+    #[serde(default)]
     pub workflow: String,
     pub status: String,
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 /// Active UI context injected into each Pi Durable turn.
@@ -199,13 +202,24 @@ pub struct AmbientEnvelope {
     pub one_shot_attachments: Vec<OneShotAttachment>,
 }
 
+/// Tool call entry emitted during a Pi Durable turn.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PiToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments_json: String,
+    #[serde(default)]
+    pub result_json: Option<String>,
+    pub status: String,
+}
+
 /// Acknowledgement returned by `pi_send_message`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PiTurnAck {
     pub turn_id: String,
     pub mode: String,
     pub reply_text: String,
-    pub tool_calls: Vec<String>,
+    pub tool_calls: Vec<PiToolCall>,
 }
 
 /// Result returned by `save_capture`.
@@ -224,6 +238,29 @@ pub struct LensInfo {
     pub rel_path: String,
 }
 
+/// Execution stage inside a Tchelvis loop run.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct LoopStage {
+    pub name: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub cycle: Option<u32>,
+    pub status: String,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub verdict: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
 /// State of a Tchelvis loop run read from `.loops/runs/*/state.json`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LoopRunState {
@@ -231,10 +268,59 @@ pub struct LoopRunState {
     pub workflow: String,
     pub title: String,
     pub status: String,
-    pub current_stage: String,
-    pub stages: Vec<String>,
+    #[serde(default)]
+    pub raw_status: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
     pub worktree_path: Option<String>,
-    pub exit_summary: Vec<String>,
+    #[serde(default)]
+    pub current_stage: Option<String>,
+    #[serde(default)]
+    pub current_cycle: Option<u32>,
+    #[serde(default)]
+    pub max_cycles: Option<u32>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub stages: Vec<LoopStage>,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub engine_pid: Option<u32>,
+}
+
+/// Workflow preset or local `.loops/workflows/*.toml` entry returned by `tchelvis loop list`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LoopWorkflowInfo {
+    pub name: String,
+    pub source: String,
+    pub description: String,
+}
+
+/// Result returned by `tchelvis loop check`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LoopCheckResult {
+    pub ok: bool,
+    pub tchelvis_available: bool,
+    pub auto_approve_enabled: Option<bool>,
+    pub workflow: String,
+    pub output: String,
+}
+
+/// Optional flags passed when dispatching a `tchelvis loop run`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct DispatchLoopOptions {
+    pub use_overrides: Vec<String>,
+    pub max_cycles: Option<u32>,
+    pub from_head: bool,
 }
 
 /// Status of the active game/web preview process.
@@ -256,12 +342,16 @@ pub struct CaptureResult {
     pub error: Option<String>,
 }
 
-/// Result of checking whether a loop worktree can be cleanly merged.
+/// Result of checking whether a loop branch/worktree can be cleanly merged.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MergeCheckResult {
     pub can_merge: bool,
+    pub can_merge_cleanly: bool,
+    pub dirty_files: Vec<String>,
+    pub colliding_files: Vec<String>,
     pub conflicting_dirty_files: Vec<String>,
-    pub worktree_path: String,
+    pub requires_stash: bool,
+    pub worktree_path: Option<String>,
     pub branch: String,
 }
 
@@ -386,4 +476,51 @@ pub struct BrowserSnapshotResult {
     pub height: u32,
     pub backend: String,
     pub fallback_reason: Option<String>,
+}
+
+/// Catalog entry for a Pi Durable LLM provider.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PiProviderCatalogEntry {
+    pub id: String,
+    pub label: String,
+    pub supports_api_key: bool,
+    pub supports_oauth: bool,
+    pub configured: bool,
+    pub auth_type: Option<String>,
+    pub env_var_hint: Option<String>,
+    pub suggested_models: Vec<String>,
+}
+
+/// Current first-run and provider readiness status for Pi Durable.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PiSetupStatus {
+    pub pi_available: bool,
+    pub pi_bin: Option<String>,
+    pub first_run_completed: bool,
+    pub needs_setup: bool,
+    pub active_provider: Option<String>,
+    pub active_model: Option<String>,
+    pub provider_ready: bool,
+    pub configured_providers: Vec<String>,
+    pub providers: Vec<PiProviderCatalogEntry>,
+    pub available_models: Vec<String>,
+}
+
+/// Request payload for `pi_configure_provider`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct PiConfigureProviderRequest {
+    pub provider: String,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub mark_completed: bool,
+}
+
+/// Result returned by `pi_check_provider` (`pi auth check --provider <p> --no-refresh --json`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PiAuthCheckResult {
+    pub status: String,
+    pub provider: String,
+    pub auth_type: Option<String>,
+    pub reason: Option<String>,
 }

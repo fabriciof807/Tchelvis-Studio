@@ -315,3 +315,10 @@ export const CameraIcon: React.FC<IconProps> = ({ size = 14, className }) => (
     <circle cx="12" cy="13" r="3" />
   </svg>
 );
+
+export const PlusIcon: React.FC<IconProps> = ({ size = 14, className }) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M5 12h14" />
+    <path d="M12 5v14" />
+  </svg>
+);

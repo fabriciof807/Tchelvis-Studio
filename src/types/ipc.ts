@@ -20,9 +20,14 @@ export interface OrphanWorktree {
 
 export interface LoopStage {
   name: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | string;
+  role?: string | null;
+  model?: string | null;
+  cycle?: number | null;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'error' | 'cancelled' | string;
   started_at?: string | null;
   finished_at?: string | null;
+  duration_ms?: number | null;
+  verdict?: string | null;
   summary?: string | null;
 }
 
@@ -30,14 +35,49 @@ export interface LoopRunState {
   run_id: string;
   workflow: string;
   title: string;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'stopped' | string;
+  status:
+    | 'queued'
+    | 'queued-offline'
+    | 'running'
+    | 'completed'
+    | 'failed'
+    | 'error'
+    | 'cancelled'
+    | 'stopped'
+    | string;
+  raw_status?: string | null;
   branch?: string | null;
   worktree_path?: string | null;
+  current_stage?: string | null;
+  current_cycle?: number | null;
+  max_cycles?: number | null;
   created_at: string;
   updated_at: string;
   stages: LoopStage[];
+  files?: string[];
   summary?: string | null;
   error?: string | null;
+  engine_pid?: number | null;
+}
+
+export interface LoopWorkflowInfo {
+  name: string;
+  source: string;
+  description: string;
+}
+
+export interface LoopCheckResult {
+  ok: boolean;
+  tchelvis_available: boolean;
+  auto_approve_enabled?: boolean | null;
+  workflow: string;
+  output: string;
+}
+
+export interface DispatchLoopOptions {
+  use_overrides?: string[];
+  max_cycles?: number | null;
+  from_head?: boolean;
 }
 
 export interface WorkspaceInfo {
@@ -45,7 +85,7 @@ export interface WorkspaceInfo {
   name: string;
   is_uninitialized: boolean;
   project_config: ProjectConfig | null;
-  orphan_worktrees: OrphanWorktree[];
+  orphan_worktrees: string[];
   offline_completed_runs: LoopRunState[];
 }
 
@@ -110,6 +150,44 @@ export interface PiTurnAck {
   mode: 'live' | 'offline_fallback' | string;
   reply_text: string;
   tool_calls: PiToolCall[];
+}
+
+export interface PiProviderCatalogEntry {
+  id: string;
+  label: string;
+  supports_api_key: boolean;
+  supports_oauth: boolean;
+  configured: boolean;
+  auth_type: string | null;
+  env_var_hint: string | null;
+  suggested_models: string[];
+}
+
+export interface PiSetupStatus {
+  pi_available: boolean;
+  pi_bin: string | null;
+  first_run_completed: boolean;
+  needs_setup: boolean;
+  active_provider: string | null;
+  active_model: string | null;
+  provider_ready: boolean;
+  configured_providers: string[];
+  providers: PiProviderCatalogEntry[];
+  available_models: string[];
+}
+
+export interface PiConfigureProviderRequest {
+  provider: string;
+  model?: string | null;
+  api_key?: string | null;
+  mark_completed: boolean;
+}
+
+export interface PiAuthCheckResult {
+  status: string;
+  provider: string;
+  auth_type: string | null;
+  reason: string | null;
 }
 
 export interface SaveCaptureResult {
@@ -224,10 +302,14 @@ export interface BrowserSnapshotResult {
 }
 
 export interface GitMergeCheckResult {
+  can_merge?: boolean;
   can_merge_cleanly: boolean;
   dirty_files: string[];
   colliding_files: string[];
+  conflicting_dirty_files?: string[];
   requires_stash: boolean;
+  worktree_path?: string | null;
+  branch?: string;
 }
 
 export interface GitMergeResult {
@@ -368,21 +450,65 @@ pre { font-size: 12px; color: #94a3b8; white-space: pre-wrap; }
   ],
 ]);
 
+const mockWorkflows: LoopWorkflowInfo[] = [
+  {
+    name: 'fast-worker-reviewer',
+    source: 'preset',
+    description: 'Implementa e revisa em ciclo rápido',
+  },
+  {
+    name: 'designer-worker-reviewer',
+    source: 'preset',
+    description: 'Projeta a solução, implementa e revisa antes de aprovar',
+  },
+  {
+    name: 'worker-reviewer-critic',
+    source: 'preset',
+    description: 'Implementa, revisa e audita antes de aprovar',
+  },
+  {
+    name: 'planner-worker-tester-critic',
+    source: 'preset',
+    description: 'Planeja, implementa, testa e audita antes de aprovar',
+  },
+];
+
 const mockLoopRuns: LoopRunState[] = [
   {
     run_id: 'run-20261123-01',
-    workflow: 'feature-loop',
+    workflow: 'fast-worker-reviewer',
     title: 'Implementar barra de calor no HUD',
     status: 'completed',
-    branch: 'loop/heat-bar',
-    worktree_path: '/tmp/mock-game/.loops/worktrees/run-20261123-01',
+    raw_status: 'PASS',
+    branch: 'loop/fast-worker-reviewer-run-20261123-01',
+    worktree_path: null,
+    current_stage: 'review',
+    current_cycle: 1,
+    max_cycles: 3,
     created_at: '2026-11-23T18:10:00Z',
     updated_at: '2026-11-23T18:22:00Z',
     stages: [
-      { name: 'spec-check', status: 'completed', summary: 'Spec validada' },
-      { name: 'implement', status: 'completed', summary: 'Shader + HUD criados' },
-      { name: 'test', status: 'completed', summary: '12/12 testes passaram' },
+      {
+        name: 'implement',
+        role: 'worker',
+        model: 'pi:opencode-go/deepseek-v4.1-flash',
+        cycle: 1,
+        status: 'completed',
+        duration_ms: 10400,
+        summary: 'Shader + HUD criados',
+      },
+      {
+        name: 'review',
+        role: 'reviewer',
+        model: 'pi:opencode-go/hy4-flash-free',
+        cycle: 1,
+        status: 'completed',
+        duration_ms: 8200,
+        verdict: 'PASS',
+        summary: '12/12 testes passaram',
+      },
     ],
+    files: ['src/hud/heat_bar.gd', 'tests/test_heat_bar.gd'],
     summary: 'Barra de calor integrada ao HUD com transição térmica.',
   },
 ];
@@ -730,6 +856,29 @@ export const ipc = {
     return info;
   },
 
+  async listLoopWorkflows(): Promise<LoopWorkflowInfo[]> {
+    if (isTauriEnv()) {
+      return invoke<LoopWorkflowInfo[]>('list_loop_workflows');
+    }
+    return [...mockWorkflows];
+  },
+
+  async checkLoop(workflow: string, useOverrides: string[] = []): Promise<LoopCheckResult> {
+    if (isTauriEnv()) {
+      return invoke<LoopCheckResult>('check_loop', {
+        workflow,
+        useOverrides: useOverrides.length > 0 ? useOverrides : null,
+      });
+    }
+    return {
+      ok: true,
+      tchelvis_available: true,
+      auto_approve_enabled: true,
+      workflow,
+      output: `Workflow '${workflow}' válido (mock). Overrides: ${useOverrides.join(', ') || 'padrão'}.`,
+    };
+  },
+
   async listLoopRuns(): Promise<LoopRunState[]> {
     if (isTauriEnv()) {
       return invoke<LoopRunState[]>('list_loop_runs');
@@ -744,24 +893,62 @@ export const ipc = {
     return `<!doctype html><html><body style="background:#14161c;color:#e2e8f0;font-family:sans-serif;padding:16px"><h2>Relatório do Loop: ${runId}</h2><p>Todos os estágios concluídos com sucesso (mock).</p></body></html>`;
   },
 
-  async dispatchLoop(workflow: string, title: string, specMarkdown: string): Promise<LoopRunState> {
+  async dispatchLoop(
+    workflow: string,
+    title: string,
+    specMarkdown: string,
+    options?: DispatchLoopOptions
+  ): Promise<LoopRunState> {
     if (isTauriEnv()) {
-      return invoke<LoopRunState>('dispatch_loop', { workflow, title, specMarkdown });
+      return invoke<LoopRunState>('dispatch_loop', {
+        workflow,
+        title,
+        specMarkdown,
+        options: options ?? null,
+      });
     }
     const now = new Date().toISOString();
+    const runId = `run-${Date.now()}`;
+    const firstOverride = options?.use_overrides?.[0]?.split('=')[1] ?? 'pi:opencode-go/deepseek-v4.1-flash';
     const run: LoopRunState = {
-      run_id: `run-${Date.now()}`,
+      run_id: runId,
       workflow,
       title,
       status: 'running',
-      branch: `loop/${workflow}`,
+      raw_status: 'RUNNING',
+      branch: `loop/${workflow}-${runId}`,
+      worktree_path: null,
+      current_stage: 'implement',
+      current_cycle: 1,
+      max_cycles: options?.max_cycles ?? 3,
       created_at: now,
       updated_at: now,
-      stages: [{ name: 'spec-check', status: 'running' }],
+      stages: [
+        {
+          name: 'implement',
+          role: 'worker',
+          model: firstOverride,
+          cycle: 1,
+          status: 'running',
+        },
+      ],
+      files: [],
       summary: specMarkdown.slice(0, 120),
     };
     mockLoopRuns.unshift(run);
     return run;
+  },
+
+  async stopLoop(runId: string): Promise<void> {
+    if (isTauriEnv()) {
+      return invoke<void>('stop_loop', { runId });
+    }
+    const target = mockLoopRuns.find((r) => r.run_id === runId);
+    if (target) {
+      target.status = 'cancelled';
+      target.raw_status = 'CANCELLED';
+      target.updated_at = new Date().toISOString();
+    }
   },
 
   async previewStart(mode: 'main' | 'staging', worktreePath?: string): Promise<PreviewStatus> {
@@ -807,12 +994,15 @@ export const ipc = {
     if (isTauriEnv()) {
       return invoke<GitMergeCheckResult>('git_check_worktree_merge', { runId });
     }
-    void runId;
     return {
+      can_merge: true,
       can_merge_cleanly: true,
       dirty_files: [],
       colliding_files: [],
+      conflicting_dirty_files: [],
       requires_stash: false,
+      worktree_path: null,
+      branch: `loop/${runId}`,
     };
   },
 
@@ -823,13 +1013,13 @@ export const ipc = {
     return {
       merged: true,
       stashed: stashDirty,
-      message: `Worktree ${runId} integrado com sucesso (mock).`,
+      message: `Loop ${runId} integrado com sucesso (mock).`,
     };
   },
 
-  async gitListOrphanWorktrees(): Promise<OrphanWorktree[]> {
+  async gitListOrphanWorktrees(): Promise<string[]> {
     if (isTauriEnv()) {
-      return invoke<OrphanWorktree[]>('git_list_orphan_worktrees');
+      return invoke<string[]>('git_list_orphan_worktrees');
     }
     return [];
   },
@@ -1062,4 +1252,224 @@ export const ipc = {
       fallback_reason: null,
     };
   },
+
+  async piGetSetupStatus(): Promise<PiSetupStatus> {
+    if (isTauriEnv()) {
+      return invoke<PiSetupStatus>('pi_get_setup_status');
+    }
+    return loadMockPiSetup();
+  },
+
+  async piCheckProvider(provider: string): Promise<PiAuthCheckResult> {
+    if (isTauriEnv()) {
+      return invoke<PiAuthCheckResult>('pi_check_provider', { provider });
+    }
+    const status = loadMockPiSetup();
+    const entry = status.providers.find((p) => p.id === provider);
+    if (entry?.configured) {
+      return {
+        status: 'ready',
+        provider,
+        auth_type: entry.auth_type ?? 'api_key',
+        reason: null,
+      };
+    }
+    return {
+      status: 'not_ready',
+      provider,
+      auth_type: null,
+      reason: 'credentials_not_configured',
+    };
+  },
+
+  async piConfigureProvider(req: PiConfigureProviderRequest): Promise<PiSetupStatus> {
+    if (isTauriEnv()) {
+      return invoke<PiSetupStatus>('pi_configure_provider', { req });
+    }
+    const status = loadMockPiSetup();
+    if (req.provider === 'offline' && req.mark_completed) {
+      status.first_run_completed = true;
+      status.needs_setup = false;
+      status.provider_ready = false;
+      saveMockPiSetup(status);
+      return status;
+    }
+    const target = status.providers.find((p) => p.id === req.provider);
+    const hasKey = Boolean(req.api_key && req.api_key.trim().length > 0);
+    if (hasKey) {
+      if (target) {
+        target.configured = true;
+        target.auth_type = 'api_key';
+      } else {
+        status.providers.push({
+          id: req.provider,
+          label: req.provider,
+          supports_api_key: true,
+          supports_oauth: true,
+          configured: true,
+          auth_type: 'api_key',
+          env_var_hint: null,
+          suggested_models: [],
+        });
+      }
+      if (!status.configured_providers.includes(req.provider)) {
+        status.configured_providers.push(req.provider);
+      }
+    }
+    status.active_provider = req.provider;
+    const chosenModel =
+      req.model?.trim() || target?.suggested_models[0] || status.active_model || null;
+    status.active_model = chosenModel;
+    status.available_models = target?.suggested_models ?? (chosenModel ? [chosenModel] : []);
+    status.provider_ready = status.configured_providers.includes(req.provider);
+    if (req.mark_completed) {
+      status.first_run_completed = true;
+    }
+    status.needs_setup = !status.first_run_completed || !status.provider_ready;
+    saveMockPiSetup(status);
+    return status;
+  },
+
+  async piLogoutProvider(provider: string): Promise<PiSetupStatus> {
+    if (isTauriEnv()) {
+      return invoke<PiSetupStatus>('pi_logout_provider', { provider });
+    }
+    const status = loadMockPiSetup();
+    status.configured_providers = status.configured_providers.filter((p) => p !== provider);
+    const target = status.providers.find((p) => p.id === provider);
+    if (target) {
+      target.configured = false;
+      target.auth_type = null;
+    }
+    if (status.active_provider === provider) {
+      status.provider_ready = false;
+      status.needs_setup = true;
+    }
+    saveMockPiSetup(status);
+    return status;
+  },
 };
+
+const MOCK_PI_SETUP_KEY = 'game-hub:mock-pi-setup';
+
+function defaultMockPiSetup(): PiSetupStatus {
+  const providers: PiProviderCatalogEntry[] = [
+    {
+      id: 'opencode-go',
+      label: 'OpenCode Go',
+      supports_api_key: true,
+      supports_oauth: true,
+      configured: false,
+      auth_type: null,
+      env_var_hint: 'OPENCODE_API_KEY',
+      suggested_models: ['deepseek-v4.1-flash', 'hy4-flash-free', 'claude-haiku-5-5'],
+    },
+    {
+      id: 'openrouter',
+      label: 'OpenRouter',
+      supports_api_key: true,
+      supports_oauth: true,
+      configured: false,
+      auth_type: null,
+      env_var_hint: 'OPENROUTER_API_KEY',
+      suggested_models: [
+        'anthropic/claude-sonnet-4.5',
+        'deepseek/deepseek-chat',
+        'google/gemini-2.5-flash',
+      ],
+    },
+    {
+      id: 'anthropic',
+      label: 'Anthropic (Claude)',
+      supports_api_key: true,
+      supports_oauth: true,
+      configured: false,
+      auth_type: null,
+      env_var_hint: 'ANTHROPIC_API_KEY',
+      suggested_models: ['claude-sonnet-4-5', 'claude-haiku-5-5'],
+    },
+    {
+      id: 'openai',
+      label: 'OpenAI',
+      supports_api_key: true,
+      supports_oauth: false,
+      configured: false,
+      auth_type: null,
+      env_var_hint: 'OPENAI_API_KEY',
+      suggested_models: ['gpt-5', 'gpt-4.1', 'gpt-4.1-mini'],
+    },
+    {
+      id: 'openai-codex',
+      label: 'OpenAI Codex (ChatGPT OAuth)',
+      supports_api_key: false,
+      supports_oauth: true,
+      configured: false,
+      auth_type: null,
+      env_var_hint: null,
+      suggested_models: ['codex-mini-latest', 'gpt-5-codex'],
+    },
+    {
+      id: 'google',
+      label: 'Google Gemini',
+      supports_api_key: true,
+      supports_oauth: true,
+      configured: false,
+      auth_type: null,
+      env_var_hint: 'GEMINI_API_KEY',
+      suggested_models: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+    },
+  ];
+  return {
+    pi_available: true,
+    pi_bin: 'pi',
+    first_run_completed: false,
+    needs_setup: true,
+    active_provider: null,
+    active_model: null,
+    provider_ready: false,
+    configured_providers: [],
+    providers,
+    available_models: [],
+  };
+}
+
+let inMemoryMockPiSetup: PiSetupStatus | null = null;
+
+function loadMockPiSetup(): PiSetupStatus {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(MOCK_PI_SETUP_KEY);
+      if (raw) {
+        return JSON.parse(raw) as PiSetupStatus;
+      }
+    }
+  } catch {
+    // ignore storage errors in restricted environments
+  }
+  if (!inMemoryMockPiSetup) {
+    inMemoryMockPiSetup = defaultMockPiSetup();
+  }
+  return structuredClone(inMemoryMockPiSetup);
+}
+
+function saveMockPiSetup(status: PiSetupStatus): void {
+  inMemoryMockPiSetup = structuredClone(status);
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(MOCK_PI_SETUP_KEY, JSON.stringify(status));
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function resetMockPiSetup(): void {
+  inMemoryMockPiSetup = null;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(MOCK_PI_SETUP_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}

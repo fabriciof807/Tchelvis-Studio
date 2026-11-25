@@ -86,8 +86,11 @@ export const App: React.FC = () => {
       if (payload.kind === 'create' || payload.kind === 'remove') {
         void refreshFileTree();
       }
-      if (payload.rel_path.startsWith('.hub/views/')) {
+      if (payload.rel_path?.startsWith('.hub/views/')) {
         void refreshLenses();
+      }
+      if (payload.rel_path?.startsWith('.loops/')) {
+        void refreshLoopRuns();
       }
     }).then((fn) => unlisteners.push(fn));
 

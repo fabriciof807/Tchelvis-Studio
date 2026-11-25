@@ -31,6 +31,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   const decrementModalCount = useWorkspaceStore((s) => s.decrementModalCount);
   const updateChannel = useWorkspaceStore((s) => s.updateChannel);
   const setUpdateChannel = useWorkspaceStore((s) => s.setUpdateChannel);
+  const piSetupStatus = useWorkspaceStore((s) => s.piSetupStatus);
   const theme = useWorkspaceStore((s) => s.theme);
   const setTheme = useWorkspaceStore((s) => s.setTheme);
 
@@ -229,6 +230,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
                   </option>
                 ))}
               </select>
+            </div>
+          </section>
+
+          {/* Pi Durable Provider Section */}
+          <section className="settings-section">
+            <div className="settings-lang-row">
+              <div>
+                <h3>{t('piSetup.settingsTitle')}</h3>
+                <p className="muted-text">{t('piSetup.settingsDesc')}</p>
+                <p className="muted-text pi-settings-status">
+                  {piSetupStatus?.provider_ready && piSetupStatus.active_provider
+                    ? t('piSetup.settingsStatusReady', {
+                        provider: piSetupStatus.active_provider,
+                        model: piSetupStatus.active_model ?? 'default',
+                      })
+                    : t('piSetup.settingsStatusOffline')}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn-ghost-xs"
+                onClick={() => {
+                  const st = useWorkspaceStore.getState();
+                  if (st.rightCollapsed) {
+                    st.toggleRight();
+                  }
+                  st.setPiSetupOpen(true);
+                  onClose();
+                }}
+              >
+                {t('piSetup.settingsConfigureBtn')}
+              </button>
             </div>
           </section>
 

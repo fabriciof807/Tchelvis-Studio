@@ -13,7 +13,9 @@ import {
   type LensInfo,
   type LoopRunState,
   type OneShotAttachment,
+  type PiConfigureProviderRequest,
   type PiEventPayload,
+  type PiSetupStatus,
   type PiToolCall,
   type PreviewStatus,
   type RecentWorkspace,
@@ -67,6 +69,10 @@ interface WorkspaceState {
   lenses: LensInfo[];
   previewStatus: PreviewStatus | null;
   previewLightboxOpen: boolean;
+
+  piSetupStatus: PiSetupStatus | null;
+  piSetupOpen: boolean;
+  pendingTerminalCommand: string | null;
 
   // UI Language, Theme & Update Channel
   locale: Locale;
@@ -127,6 +133,14 @@ interface WorkspaceState {
   stopPreview: () => Promise<void>;
   capturePreviewFrame: () => Promise<void>;
   setPreviewLightboxOpen: (open: boolean) => void;
+
+  refreshPiSetupStatus: () => Promise<PiSetupStatus | null>;
+  setPiSetupOpen: (open: boolean) => void;
+  configurePiProvider: (req: PiConfigureProviderRequest) => Promise<PiSetupStatus>;
+  logoutPiProvider: (provider: string) => Promise<PiSetupStatus>;
+  skipPiSetup: () => Promise<PiSetupStatus>;
+  launchPiInteractiveLogin: (provider: string) => void;
+  consumePendingTerminalCommand: () => string | null;
 }
 
 const UPDATE_CHANNEL_KEY = 'game-hub:update-channel';
@@ -166,6 +180,15 @@ function parseFlowSlashCommand(
   };
 }
 
+function parseLoopSlashCommand(trimmed: string): { title: string; prompt: string } | null {
+  if (!trimmed.startsWith('/loop ')) return null;
+  const rest = trimmed.slice(6).trim();
+  if (!rest) return null;
+  const firstLine = rest.split('\n')[0]?.trim() ?? rest;
+  const title = firstLine.length > 64 ? `${firstLine.slice(0, 61)}...` : firstLine;
+  return { title, prompt: rest };
+}
+
 function computeZenMode(left: boolean, right: boolean, bottom: boolean): boolean {
   return left && right && bottom;
 }
@@ -193,6 +216,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   lenses: [],
   previewStatus: null,
   previewLightboxOpen: false,
+
+  piSetupStatus: null,
+  piSetupOpen: false,
+  pendingTerminalCommand: null,
 
   locale: getInitialLocale(),
   setLocale: (locale) => {
@@ -249,10 +276,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       previewLightboxOpen: false,
     });
 
-    const [tree, lenses, runs] = await Promise.all([
+    const [tree, lenses, runs, piSetup] = await Promise.all([
       ipc.getWorkspaceTree().catch(() => []),
       ipc.listLenses().catch(() => []),
       ipc.listLoopRuns().catch(() => []),
+      ipc.piGetSetupStatus().catch(() => null),
     ]);
 
     const systemNotes: ChatMessage[] = [];
@@ -280,6 +308,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       lenses,
       loopRuns: runs,
       chatMessages: systemNotes,
+      piSetupStatus: piSetup,
+      piSetupOpen: piSetup?.needs_setup === true,
     });
   },
 
@@ -377,6 +407,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return {
         rightCollapsed,
         zenMode: computeZenMode(state.leftCollapsed, rightCollapsed, state.bottomCollapsed),
+        piSetupOpen:
+          !rightCollapsed && state.piSetupStatus?.needs_setup ? true : state.piSetupOpen,
       };
     }),
 
@@ -520,6 +552,111 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return;
     }
 
+    const loopCmd = parseLoopSlashCommand(trimmed);
+    if (loopCmd) {
+      const turnId = `loop-turn-${Date.now()}`;
+      const toolId = `loop-tool-${Date.now()}`;
+      const dispatchArgs = {
+        workflow: 'fast-worker-reviewer',
+        title: loopCmd.title,
+        spec_markdown: loopCmd.prompt,
+        options: {
+          from_head: true,
+          max_cycles: 3,
+          use_overrides: [
+            'implement=pi:opencode-go/deepseek-v4.1-flash',
+            'review=pi:opencode-go/hy4-flash-free',
+          ],
+        },
+      };
+      const runningTool: PiToolCall = {
+        id: toolId,
+        name: 'dispatch_tchelvis_loop',
+        arguments_json: JSON.stringify(dispatchArgs, null, 2),
+        status: 'running',
+      };
+      set((s) => ({
+        chatMessages: [
+          ...s.chatMessages,
+          {
+            id: turnId,
+            role: 'assistant',
+            text: `Iniciando loop \`${dispatchArgs.workflow}\`...`,
+            timestamp: new Date().toISOString(),
+            tool_calls: [runningTool],
+          },
+        ],
+      }));
+
+      try {
+        const run = await ipc.dispatchLoop(
+          dispatchArgs.workflow,
+          dispatchArgs.title,
+          dispatchArgs.spec_markdown,
+          dispatchArgs.options
+        );
+        await get().refreshLoopRuns().catch(() => {});
+        get().requestOpenPanel('loops', 'Loops', { runId: run.run_id });
+        set((s) => ({
+          isSendingChat: false,
+          chatMessages: s.chatMessages.map((m) =>
+            m.id === turnId
+              ? {
+                  ...m,
+                  text: `Loop \`${run.run_id}\` iniciado (${run.workflow} · status: ${run.status}${run.branch ? ` · branch: \`${run.branch}\`` : ''}).`,
+                  tool_calls: [
+                    {
+                      ...runningTool,
+                      status: 'completed',
+                      result_json: JSON.stringify(run, null, 2),
+                    },
+                  ],
+                }
+              : m
+          ),
+        }));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        set((s) => ({
+          isSendingChat: false,
+          chatMessages: s.chatMessages.map((m) =>
+            m.id === turnId
+              ? {
+                  ...m,
+                  text: `Falha ao iniciar loop: ${msg}`,
+                  tool_calls: [
+                    {
+                      ...runningTool,
+                      status: 'error',
+                      result_json: msg,
+                    },
+                  ],
+                }
+              : m
+          ),
+        }));
+      }
+      return;
+    }
+
+    if (get().piSetupStatus?.needs_setup) {
+      const hint = translate(get().locale, 'piSetup.chatBlockedHint');
+      set((s) => ({
+        isSendingChat: false,
+        piSetupOpen: true,
+        chatMessages: [
+          ...s.chatMessages,
+          {
+            id: `sys-pi-setup-${Date.now()}`,
+            role: 'system',
+            text: hint,
+            timestamp: new Date().toISOString(),
+          },
+        ],
+      }));
+      return;
+    }
+
     try {
       const ack = await ipc.piSendMessage(envelope);
       const assistantMsg: ChatMessage = {
@@ -659,4 +796,66 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   setPreviewLightboxOpen: (open) => set({ previewLightboxOpen: open }),
+
+  refreshPiSetupStatus: async () => {
+    try {
+      const status = await ipc.piGetSetupStatus();
+      set((s) => ({
+        piSetupStatus: status,
+        piSetupOpen: status.needs_setup ? s.piSetupOpen : false,
+      }));
+      return status;
+    } catch {
+      return null;
+    }
+  },
+
+  setPiSetupOpen: (open) => set({ piSetupOpen: open }),
+
+  configurePiProvider: async (req) => {
+    const status = await ipc.piConfigureProvider(req);
+    set({
+      piSetupStatus: status,
+      piSetupOpen: status.needs_setup,
+    });
+    return status;
+  },
+
+  logoutPiProvider: async (provider) => {
+    const status = await ipc.piLogoutProvider(provider);
+    set({
+      piSetupStatus: status,
+    });
+    return status;
+  },
+
+  skipPiSetup: async () => {
+    const status = await ipc.piConfigureProvider({
+      provider: 'offline',
+      mark_completed: true,
+    });
+    set({
+      piSetupStatus: status,
+      piSetupOpen: false,
+    });
+    return status;
+  },
+
+  launchPiInteractiveLogin: (provider) => {
+    const clean = provider.trim();
+    if (!clean) return;
+    set((state) => ({
+      bottomCollapsed: false,
+      zenMode: computeZenMode(state.leftCollapsed, state.rightCollapsed, false),
+      pendingTerminalCommand: `pi auth login ${clean}\r`,
+    }));
+  },
+
+  consumePendingTerminalCommand: () => {
+    const cmd = get().pendingTerminalCommand;
+    if (cmd !== null) {
+      set({ pendingTerminalCommand: null });
+    }
+    return cmd;
+  },
 }));
