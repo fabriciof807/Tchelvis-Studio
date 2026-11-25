@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { useWorkspaceStore } from '../store/workspaceStore';
-import { translate, type TranslationKey } from './index';
+import { translate, translatePlural, type PluralKey, type TranslationKey } from './index';
 
 export function useI18n() {
   const locale = useWorkspaceStore((s) => s.locale);
@@ -12,5 +12,11 @@ export function useI18n() {
     [locale]
   );
 
-  return { locale, setLocale, t };
+  const tp = useCallback(
+    (key: PluralKey, count: number, vars?: Record<string, string | number>) =>
+      translatePlural(locale, key, count, vars),
+    [locale]
+  );
+
+  return { locale, setLocale, t, tp };
 }

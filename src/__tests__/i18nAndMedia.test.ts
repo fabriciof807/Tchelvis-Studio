@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { detectSystemLocale, normalizeLocale, translate } from '../i18n';
+import { detectSystemLocale, normalizeLocale, translate, translatePlural, translations } from '../i18n';
 import { getFileExtension, getMediaKind, getMimeTypeForExt } from '../panels/mediaUtils';
 import { isThemeId, THEME_OPTIONS } from '../themes';
 
@@ -30,6 +30,22 @@ describe('i18n locale detection and translation', () => {
     expect(translate('en', 'chat.title')).toBe('Chat');
     expect(translate('zh-CN', 'chat.title')).toBe('Chat');
     expect(translate('zh-CN', 'settings.title')).toBe('设置');
+  });
+});
+
+describe('i18n key parity and plurals', () => {
+  it('defines exactly the same keys in every locale', () => {
+    const reference = Object.keys(translations.en).sort();
+    expect(Object.keys(translations['pt-BR']).sort()).toEqual(reference);
+    expect(Object.keys(translations['zh-CN']).sort()).toEqual(reference);
+  });
+
+  it('picks _one/_other with Intl.PluralRules for the active locale', () => {
+    expect(translatePlural('en', 'modelPicker.modelCount', 1)).toBe('1 model');
+    expect(translatePlural('en', 'modelPicker.modelCount', 34)).toBe('34 models');
+    expect(translatePlural('pt-BR', 'modelPicker.modelCount', 1)).toBe('1 modelo');
+    expect(translatePlural('pt-BR', 'modelPicker.modelCount', 2)).toBe('2 modelos');
+    expect(translatePlural('zh-CN', 'modelPicker.modelCount', 1)).toBe('1 个模型');
   });
 });
 

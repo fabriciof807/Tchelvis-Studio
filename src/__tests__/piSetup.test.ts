@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ipc, resetMockPiSetup } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
 
@@ -13,6 +13,9 @@ describe('Pi Durable first-run provider setup', () => {
       chatMessages: [],
       piSetupStatus: null,
       piSetupOpen: false,
+      modelCatalog: null,
+      modelCatalogLoading: false,
+      modelCatalogError: null,
       pendingTerminalCommand: null,
       bottomCollapsed: true,
       rightCollapsed: false,
@@ -116,5 +119,58 @@ describe('Pi Durable first-run provider setup', () => {
     expect(after.fallback_reason).toBeNull();
     expect(after.models.length).toBeGreaterThan(0);
     expect(after.models.every((m) => m.provider === 'openrouter')).toBe(true);
+  });
+  it('loadModelCatalog stores the catalog and refetches it after connecting or disconnecting', async () => {
+    await useWorkspaceStore.getState().loadModelCatalog();
+    let st = useWorkspaceStore.getState();
+    expect(st.modelCatalog?.source).toBe('curated');
+    expect(st.modelCatalogLoading).toBe(false);
+
+    await useWorkspaceStore.getState().configurePiProvider({
+      provider: 'opencode-go',
+      api_key: 'sk-test-mock-123',
+      mark_completed: true,
+    });
+    await vi.waitFor(() => expect(useWorkspaceStore.getState().modelCatalog?.source).toBe('pi_rpc'));
+    st = useWorkspaceStore.getState();
+    expect(st.modelCatalog?.models.every((m) => m.provider === 'opencode-go')).toBe(true);
+
+    await useWorkspaceStore.getState().logoutPiProvider('opencode-go');
+    await vi.waitFor(() => expect(useWorkspaceStore.getState().modelCatalog?.source).toBe('curated'));
+  });
+
+  it('refetches the catalog when a status refresh reports a newly connected provider (OAuth verify)', async () => {
+    await useWorkspaceStore.getState().refreshPiSetupStatus();
+    await useWorkspaceStore.getState().loadModelCatalog();
+    const spy = vi.spyOn(ipc, 'piListModels');
+
+    await useWorkspaceStore.getState().refreshPiSetupStatus();
+    expect(spy).not.toHaveBeenCalled();
+
+    const status = await ipc.piGetSetupStatus();
+    vi.spyOn(ipc, 'piGetSetupStatus').mockResolvedValueOnce({
+      ...status,
+      configured_providers: ['opencode-go'],
+    });
+    await useWorkspaceStore.getState().refreshPiSetupStatus();
+    expect(spy).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+  });
+
+  it('keeps the previous catalog visible while revalidating and reports failures', async () => {
+    await useWorkspaceStore.getState().loadModelCatalog();
+    const previous = useWorkspaceStore.getState().modelCatalog;
+
+    const spy = vi.spyOn(ipc, 'piListModels').mockRejectedValueOnce(new Error('boom'));
+    const pending = useWorkspaceStore.getState().loadModelCatalog();
+    expect(useWorkspaceStore.getState().modelCatalogLoading).toBe(true);
+    expect(useWorkspaceStore.getState().modelCatalog).toBe(previous);
+    await pending;
+
+    const st = useWorkspaceStore.getState();
+    expect(st.modelCatalogLoading).toBe(false);
+    expect(st.modelCatalog).toBe(previous);
+    expect(st.modelCatalogError).toBe('boom');
+    spy.mockRestore();
   });
 });

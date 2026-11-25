@@ -3,6 +3,7 @@ import { ipc } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
 import { useI18n } from '../i18n/useI18n';
 import { CloseIcon } from './Icons';
+import { ModelPicker } from './modelPicker/ModelPicker';
 
 const CUSTOM_PROVIDER_VALUE = '__custom__';
 
@@ -15,6 +16,10 @@ export const PiSetupWizard: React.FC = () => {
   const refreshPiSetupStatus = useWorkspaceStore((s) => s.refreshPiSetupStatus);
   const launchPiInteractiveLogin = useWorkspaceStore((s) => s.launchPiInteractiveLogin);
   const setPiSetupOpen = useWorkspaceStore((s) => s.setPiSetupOpen);
+  const modelCatalog = useWorkspaceStore((s) => s.modelCatalog);
+  const modelCatalogLoading = useWorkspaceStore((s) => s.modelCatalogLoading);
+  const modelCatalogError = useWorkspaceStore((s) => s.modelCatalogError);
+  const loadModelCatalog = useWorkspaceStore((s) => s.loadModelCatalog);
 
   const providers = piSetupStatus?.providers ?? [];
   const defaultProviderId =
@@ -65,12 +70,9 @@ export const PiSetupWizard: React.FC = () => {
     }
   }, [selectedEntry]);
 
-  const modelOptions = useMemo(() => {
-    const set = new Set<string>();
-    for (const m of piSetupStatus?.available_models ?? []) set.add(m);
-    for (const m of selectedEntry?.suggested_models ?? []) set.add(m);
-    return Array.from(set);
-  }, [piSetupStatus?.available_models, selectedEntry]);
+  useEffect(() => {
+    void loadModelCatalog();
+  }, [loadModelCatalog]);
 
   if (!piSetupStatus) return null;
 
@@ -82,6 +84,31 @@ export const PiSetupWizard: React.FC = () => {
       if (entry && entry.suggested_models.length > 0) {
         setModelInput(entry.suggested_models[0]);
       }
+    }
+  };
+
+  const handleModelChange = (selection: { provider: string | null; id: string }) => {
+    setModelInput(selection.id);
+    setFeedback(null);
+    // The default model belongs to one provider, so picking another provider's model selects that provider.
+    if (selection.provider && selection.provider !== effectiveProvider) {
+      if (providers.some((p) => p.id === selection.provider)) {
+        setSelectedOption(selection.provider);
+      } else {
+        setSelectedOption(CUSTOM_PROVIDER_VALUE);
+        setCustomProvider(selection.provider);
+      }
+    }
+  };
+
+  const handleConnectProvider = (providerId: string) => {
+    if (providers.some((p) => p.id === providerId)) {
+      handleProviderChange(providerId);
+    } else {
+      // Not in the curated list (e.g. found in pi's models store): configure it as a custom slug.
+      setSelectedOption(CUSTOM_PROVIDER_VALUE);
+      setCustomProvider(providerId);
+      setFeedback(null);
     }
   };
 
@@ -358,23 +385,22 @@ export const PiSetupWizard: React.FC = () => {
         )}
 
         <div className="pi-setup-field">
-          <label className="pi-setup-label" htmlFor="pi-model-input">
+          <span className="pi-setup-label" id="pi-model-label">
             {t('piSetup.modelLabel')}
-          </label>
-          <input
-            id="pi-model-input"
-            type="text"
-            list="pi-model-suggestions"
-            className="pi-setup-input"
-            value={modelInput}
-            onChange={(e) => setModelInput(e.target.value)}
-            placeholder={t('piSetup.modelPlaceholder')}
+          </span>
+          <ModelPicker
+            labelId="pi-model-label"
+            catalog={modelCatalog}
+            loading={modelCatalogLoading}
+            error={modelCatalogError}
+            providers={providers}
+            connectedProviders={piSetupStatus.configured_providers}
+            selectableProvider={effectiveProvider || null}
+            value={modelInput.trim() ? { provider: effectiveProvider, id: modelInput.trim() } : null}
+            onChange={handleModelChange}
+            onRetry={() => void loadModelCatalog()}
+            onConnectProvider={handleConnectProvider}
           />
-          <datalist id="pi-model-suggestions">
-            {modelOptions.map((m) => (
-              <option key={m} value={m} />
-            ))}
-          </datalist>
         </div>
 
         {feedback && (

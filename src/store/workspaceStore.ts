@@ -15,6 +15,7 @@ import {
   type OneShotAttachment,
   type PiConfigureProviderRequest,
   type PiEventPayload,
+  type PiModelCatalog,
   type PiSetupStatus,
   type PiToolCall,
   type PreviewStatus,
@@ -71,6 +72,10 @@ interface WorkspaceState {
   previewLightboxOpen: boolean;
 
   piSetupStatus: PiSetupStatus | null;
+  /** Last known pi model catalog; kept while a refetch runs (stale-while-revalidate). */
+  modelCatalog: PiModelCatalog | null;
+  modelCatalogLoading: boolean;
+  modelCatalogError: string | null;
   piSetupOpen: boolean;
   pendingTerminalCommand: string | null;
 
@@ -138,6 +143,7 @@ interface WorkspaceState {
   setPiSetupOpen: (open: boolean) => void;
   configurePiProvider: (req: PiConfigureProviderRequest) => Promise<PiSetupStatus>;
   logoutPiProvider: (provider: string) => Promise<PiSetupStatus>;
+  loadModelCatalog: () => Promise<void>;
   skipPiSetup: () => Promise<PiSetupStatus>;
   launchPiInteractiveLogin: (provider: string) => void;
   consumePendingTerminalCommand: () => string | null;
@@ -193,6 +199,15 @@ function computeZenMode(left: boolean, right: boolean, bottom: boolean): boolean
   return left && right && bottom;
 }
 
+function sameMembers(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const set = new Set(a);
+  return b.every((x) => set.has(x));
+}
+
+/** Only the newest catalog request may write its result, so a slow older one can't overwrite it. */
+let modelCatalogRequest = 0;
+
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspace: null,
   recentWorkspaces: [],
@@ -220,6 +235,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   piSetupStatus: null,
   piSetupOpen: false,
   pendingTerminalCommand: null,
+  modelCatalog: null,
+  modelCatalogLoading: false,
+  modelCatalogError: null,
 
   locale: getInitialLocale(),
   setLocale: (locale) => {
@@ -800,10 +818,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   refreshPiSetupStatus: async () => {
     try {
       const status = await ipc.piGetSetupStatus();
+      const previous = get().piSetupStatus?.configured_providers ?? null;
       set((s) => ({
         piSetupStatus: status,
         piSetupOpen: status.needs_setup ? s.piSetupOpen : false,
       }));
+      // A provider connected outside configure (e.g. OAuth in the terminal + Verify) changes pi's catalog.
+      if (previous !== null && !sameMembers(previous, status.configured_providers)) {
+        void get().loadModelCatalog();
+      }
       return status;
     } catch {
       return null;
@@ -818,6 +841,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       piSetupStatus: status,
       piSetupOpen: status.needs_setup,
     });
+    void get().loadModelCatalog();
     return status;
   },
 
@@ -826,7 +850,24 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set({
       piSetupStatus: status,
     });
+    void get().loadModelCatalog();
     return status;
+  },
+
+  loadModelCatalog: async () => {
+    const request = ++modelCatalogRequest;
+    set({ modelCatalogLoading: true, modelCatalogError: null });
+    try {
+      const catalog = await ipc.piListModels();
+      if (request !== modelCatalogRequest) return;
+      set({ modelCatalog: catalog, modelCatalogLoading: false });
+    } catch (err) {
+      if (request !== modelCatalogRequest) return;
+      set({
+        modelCatalogLoading: false,
+        modelCatalogError: err instanceof Error ? err.message : String(err),
+      });
+    }
   },
 
   skipPiSetup: async () => {
