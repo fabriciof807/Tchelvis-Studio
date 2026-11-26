@@ -19,6 +19,9 @@ const DEFAULT_WORKFLOW = 'fast-worker-reviewer';
 const DEFAULT_IMPLEMENT_MODEL = 'pi:opencode-go/deepseek-v4.1-flash';
 const DEFAULT_REVIEW_MODEL = 'pi:opencode-go/hy4-flash-free';
 
+/** Explicit preview outcomes: the phase alone can't tell a cancel from a failure. */
+type PreviewOutcome = 'ok' | 'cancelled' | { error: string };
+
 function formatDurationMs(ms?: number | null): string | null {
   if (typeof ms !== 'number' || Number.isNaN(ms)) return null;
   if (ms < 1000) return `${ms}ms`;
@@ -29,6 +32,7 @@ export const LoopsPanel: React.FC<IDockviewPanelProps<LoopsPanelParams>> = ({ pa
   const { t } = useI18n();
   const loopRuns = useWorkspaceStore((s) => s.loopRuns);
   const previewStatus = useWorkspaceStore((s) => s.previewStatus);
+  const previewPhase = useWorkspaceStore((s) => s.previewPhase);
   const refreshLoopRuns = useWorkspaceStore((s) => s.refreshLoopRuns);
   const startPreview = useWorkspaceStore((s) => s.startPreview);
   const stopPreview = useWorkspaceStore((s) => s.stopPreview);
@@ -86,6 +90,9 @@ export const LoopsPanel: React.FC<IDockviewPanelProps<LoopsPanelParams>> = ({ pa
     () => loopRuns.find((r) => r.run_id === selectedRunId) ?? loopRuns[0],
     [loopRuns, selectedRunId]
   );
+
+  const outcomeError = (outcome: PreviewOutcome): string | null =>
+    typeof outcome === 'object' ? outcome.error : null;
 
   const buildUseOverrides = (): string[] => {
     const overrides: string[] = [];
@@ -168,7 +175,13 @@ export const LoopsPanel: React.FC<IDockviewPanelProps<LoopsPanelParams>> = ({ pa
     setBusy(true);
     setActionError(null);
     try {
-      await startPreview('staging', activeRun.worktree_path);
+      const outcome = await startPreview('staging', activeRun.worktree_path);
+      if (outcome === 'cancelled') return;
+      const failure = outcomeError(outcome);
+      if (failure) {
+        setActionError(failure);
+        return;
+      }
       setActionMessage(`Staging iniciado para ${activeRun.run_id}.`);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -196,7 +209,13 @@ export const LoopsPanel: React.FC<IDockviewPanelProps<LoopsPanelParams>> = ({ pa
     setActionError(null);
     try {
       await stopPreview();
-      await startPreview('staging', activeRun.worktree_path);
+      const outcome = await startPreview('staging', activeRun.worktree_path);
+      if (outcome === 'cancelled') return;
+      const failure = outcomeError(outcome);
+      if (failure) {
+        setActionError(failure);
+        return;
+      }
       setActionMessage('Preview de staging reiniciado.');
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -209,7 +228,12 @@ export const LoopsPanel: React.FC<IDockviewPanelProps<LoopsPanelParams>> = ({ pa
     setBusy(true);
     setActionError(null);
     try {
-      await capturePreviewFrame();
+      const outcome = await capturePreviewFrame();
+      const failure = outcomeError(outcome);
+      if (failure) {
+        setActionError(failure);
+        return;
+      }
       setActionMessage('Frame + log anexados como chip one-shot no Chat.');
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -224,7 +248,12 @@ export const LoopsPanel: React.FC<IDockviewPanelProps<LoopsPanelParams>> = ({ pa
     setActionError(null);
     setActionMessage(null);
     try {
-      if (previewStatus?.running) {
+      // A preview that is still starting must also stop before the merge replaces its tree.
+      if (
+        previewPhase === 'running' ||
+        previewPhase === 'starting' ||
+        previewStatus?.pid != null
+      ) {
         await stopPreview();
       }
       const check = await ipc.gitCheckWorktreeMerge(activeRun.run_id);

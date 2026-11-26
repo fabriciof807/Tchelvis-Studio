@@ -1,7 +1,7 @@
 use crate::fs_watcher::format_epoch_ms_rfc3339;
 use crate::types::{
-    PiAuthCheckResult, PiConfigureProviderRequest, PiModelCatalog, PiModelInfo,
-    PiProviderCatalogEntry, PiSetupStatus,
+    PiAuthCheckResult, PiConfigureProviderRequest, PiConnectProviderRequest, PiConnectResult,
+    PiModelCatalog, PiModelInfo, PiProviderCatalogEntry, PiSetupStatus,
 };
 use crate::workspace::config_dir;
 use serde::{Deserialize, Serialize};
@@ -750,6 +750,10 @@ pub fn configure_pi_provider_in(
     ensure_private_dir(pi_agent_dir)?;
     let settings_path = pi_agent_dir.join("settings.json");
     let mut settings_map = read_json_map(&settings_path);
+    let previous_provider = settings_map
+        .get("defaultProvider")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     settings_map.insert(
         "defaultProvider".to_string(),
         serde_json::Value::String(provider.to_string()),
@@ -760,11 +764,18 @@ pub fn configure_pi_provider_in(
         .map(|m| m.trim())
         .filter(|m| !m.is_empty())
         .map(|m| m.to_string());
-    if let Some(ref m) = trimmed_model {
-        settings_map.insert(
-            "defaultModel".to_string(),
-            serde_json::Value::String(m.clone()),
-        );
+    match trimmed_model {
+        Some(ref m) => {
+            settings_map.insert(
+                "defaultModel".to_string(),
+                serde_json::Value::String(m.clone()),
+            );
+        }
+        None if previous_provider.as_deref() != Some(provider) => {
+            // A model of the previous provider must not become the default of this one.
+            settings_map.remove("defaultModel");
+        }
+        None => {}
     }
     write_json_atomic(
         &settings_path,
@@ -784,6 +795,76 @@ pub fn configure_pi_provider_in(
     }
 
     get_pi_setup_status_in(pi_bin_override, pi_agent_dir, hub_config_dir)
+}
+
+/// Saves an API key for `provider` and verifies it with `pi auth check`.
+///
+/// The key is kept when the check cannot run (`check_error` is set) and restored
+/// (or removed) when pi reports it as `invalid`, so a failed attempt never
+/// destroys a working credential. Neither `settings.json` nor `pi_setup.json` is
+/// touched here.
+pub fn connect_pi_provider_in(
+    pi_bin: Option<&Path>,
+    pi_agent_dir: &Path,
+    hub_config_dir: &Path,
+    req: &PiConnectProviderRequest,
+) -> Result<PiConnectResult, String> {
+    let provider = req.provider.trim();
+    validate_provider_slug(provider)?;
+    let key = req.api_key.trim();
+    if key.is_empty() {
+        return Err("api key is empty".to_string());
+    }
+
+    ensure_private_dir(pi_agent_dir)?;
+    let auth_path = pi_agent_dir.join("auth.json");
+    let mut auth_map = read_json_map(&auth_path);
+    // Remembered in memory only, so an `invalid` answer can roll back.
+    let previous_entry = auth_map.remove(provider);
+    auth_map.insert(
+        provider.to_string(),
+        serde_json::json!({
+            "type": "api_key",
+            "key": key,
+        }),
+    );
+    write_json_atomic(&auth_path, &serde_json::Value::Object(auth_map), 0o600)?;
+
+    let mut check = None;
+    let mut check_error = None;
+    if let Some(bin) = pi_bin {
+        match check_pi_provider_auth(bin, pi_agent_dir, provider) {
+            Ok(result) => {
+                if result.status == "invalid" {
+                    let mut restore_map = read_json_map(&auth_path);
+                    restore_map.remove(provider);
+                    if let Some(previous) = previous_entry {
+                        restore_map.insert(provider.to_string(), previous);
+                    }
+                    write_json_atomic(
+                        &auth_path,
+                        &serde_json::Value::Object(restore_map),
+                        0o600,
+                    )?;
+                }
+                check = Some(result);
+            }
+            Err(err) => {
+                // Raw pi output stays on the app's stderr; the UI gets a generic reason.
+                eprintln!("pi auth check after connect failed for '{provider}': {err}");
+                check_error = Some(format!(
+                    "could not verify the {provider} credential with pi auth check"
+                ));
+            }
+        }
+    }
+
+    let status = get_pi_setup_status_in(pi_bin, pi_agent_dir, hub_config_dir)?;
+    Ok(PiConnectResult {
+        status,
+        check,
+        check_error,
+    })
 }
 
 /// Removes a provider's credentials from `auth.json` atomically.
@@ -1228,5 +1309,388 @@ mod tests {
         assert!(status.first_run_completed);
         assert!(!status.needs_setup);
         assert!(!status.provider_ready);
+    }
+
+    #[test]
+    fn configure_request_debug_redacts_key() {
+        let req = PiConfigureProviderRequest {
+            provider: "x".to_string(),
+            api_key: Some("sk-test-secret".to_string()),
+            ..Default::default()
+        };
+        let debug = format!("{req:?}");
+        assert!(
+            !debug.contains("sk-test-secret"),
+            "Debug leaked the api key: {debug}"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "missing redaction marker: {debug}"
+        );
+
+        let no_key = PiConfigureProviderRequest {
+            provider: "x".to_string(),
+            ..Default::default()
+        };
+        let no_key_debug = format!("{no_key:?}");
+        assert!(
+            no_key_debug.contains("api_key: None"),
+            "missing api_key field: {no_key_debug}"
+        );
+        assert!(!no_key_debug.contains("<redacted>"), "{no_key_debug}");
+    }
+
+    fn seed_settings(agent_dir: &Path, raw: &str) {
+        fs::create_dir_all(agent_dir).unwrap();
+        fs::write(agent_dir.join("settings.json"), raw).unwrap();
+    }
+
+    fn read_settings(agent_dir: &Path) -> serde_json::Value {
+        let raw = fs::read_to_string(agent_dir.join("settings.json")).unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn configure_other_provider_without_model_clears_default_model() {
+        let dir = TempDir::new().unwrap();
+        let pi_agent_dir = dir.path().join("pi-agent");
+        let hub_cfg_dir = dir.path().join("hub-cfg");
+        fs::create_dir_all(&hub_cfg_dir).unwrap();
+        seed_settings(
+            &pi_agent_dir,
+            r#"{"defaultProvider":"a","defaultModel":"m1"}"#,
+        );
+
+        configure_pi_provider_in(
+            None,
+            &pi_agent_dir,
+            &hub_cfg_dir,
+            &PiConfigureProviderRequest {
+                provider: "b".to_string(),
+                model: None,
+                api_key: None,
+                mark_completed: false,
+            },
+        )
+        .unwrap();
+
+        let settings = read_settings(&pi_agent_dir);
+        assert_eq!(settings["defaultProvider"], "b");
+        assert!(
+            settings.get("defaultModel").is_none(),
+            "defaultModel of the previous provider must be cleared: {settings}"
+        );
+    }
+
+    #[test]
+    fn configure_same_provider_without_model_keeps_default_model() {
+        let dir = TempDir::new().unwrap();
+        let pi_agent_dir = dir.path().join("pi-agent");
+        let hub_cfg_dir = dir.path().join("hub-cfg");
+        fs::create_dir_all(&hub_cfg_dir).unwrap();
+        seed_settings(
+            &pi_agent_dir,
+            r#"{"defaultProvider":"a","defaultModel":"m1"}"#,
+        );
+
+        configure_pi_provider_in(
+            None,
+            &pi_agent_dir,
+            &hub_cfg_dir,
+            &PiConfigureProviderRequest {
+                provider: "a".to_string(),
+                model: None,
+                api_key: None,
+                mark_completed: false,
+            },
+        )
+        .unwrap();
+
+        let settings = read_settings(&pi_agent_dir);
+        assert_eq!(settings["defaultProvider"], "a");
+        assert_eq!(settings["defaultModel"], "m1");
+    }
+
+    const CONNECT_READY_JSON: &str =
+        r#"{"status":"ready","provider":"opencode-go","authType":"api_key"}"#;
+    const CONNECT_INVALID_JSON: &str =
+        r#"{"status":"invalid","provider":"opencode-go","reason":"expired"}"#;
+
+    /// Fake pi that records its argv in `<dir>/argv.log` and prints `status_json`.
+    fn fake_pi(dir: &Path, status_json: &str) -> std::path::PathBuf {
+        let log_path = dir.join("argv.log");
+        let body = format!(
+            "printf '%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' '{}'\n",
+            log_path.display(),
+            status_json
+        );
+        write_fake_pi(dir, &body)
+    }
+
+    fn connect_dirs(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let agent = dir.join("pi-agent");
+        let hub = dir.join("hub-cfg");
+        fs::create_dir_all(&agent).unwrap();
+        fs::create_dir_all(&hub).unwrap();
+        (agent, hub)
+    }
+
+    fn connect_req(provider: &str, key: &str) -> PiConnectProviderRequest {
+        PiConnectProviderRequest {
+            provider: provider.to_string(),
+            api_key: key.to_string(),
+        }
+    }
+
+    fn read_auth(agent_dir: &Path) -> serde_json::Value {
+        let raw = fs::read_to_string(agent_dir.join("auth.json")).unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn connect_writes_key_0600_and_checks_with_safe_flags() {
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let pi = fake_pi(dir.path(), CONNECT_READY_JSON);
+        let key = "sk-test-new-ready-123";
+
+        let result = connect_pi_provider_in(
+            Some(&pi),
+            &agent,
+            &hub,
+            &connect_req("opencode-go", key),
+        )
+        .unwrap();
+
+        let auth = read_auth(&agent);
+        assert_eq!(auth["opencode-go"]["type"], "api_key");
+        assert_eq!(auth["opencode-go"]["key"], key);
+        let mode = fs::metadata(agent.join("auth.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "auth.json must stay private");
+
+        assert_eq!(result.check.as_ref().unwrap().status, "ready");
+        assert!(result.check_error.is_none());
+        assert!(result
+            .status
+            .configured_providers
+            .contains(&"opencode-go".to_string()));
+
+        let argv = fs::read_to_string(dir.path().join("argv.log")).unwrap();
+        let invocations: Vec<&str> = argv.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            invocations.first().copied(),
+            Some("auth check --provider opencode-go --no-refresh --json")
+        );
+        // get_pi_setup_status_in re-checks the active provider; every call must use the safe flags.
+        assert!(
+            invocations
+                .iter()
+                .all(|l| *l == "auth check --provider opencode-go --no-refresh --json"),
+            "unexpected pi invocation: {invocations:?}"
+        );
+        assert!(!argv.contains("--credentials"));
+    }
+
+    #[test]
+    fn connect_invalid_restores_previous_entry() {
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let previous = serde_json::json!({"type":"api_key","key":"sk-test-old"});
+        fs::write(
+            agent.join("auth.json"),
+            serde_json::json!({"opencode-go": previous.clone()}).to_string(),
+        )
+        .unwrap();
+        let pi = fake_pi(dir.path(), CONNECT_INVALID_JSON);
+
+        let result = connect_pi_provider_in(
+            Some(&pi),
+            &agent,
+            &hub,
+            &connect_req("opencode-go", "sk-test-new-invalid"),
+        )
+        .unwrap();
+
+        assert_eq!(result.check.as_ref().unwrap().status, "invalid");
+        assert!(result.check_error.is_none());
+        assert_eq!(read_auth(&agent)["opencode-go"], previous);
+    }
+
+    #[test]
+    fn connect_invalid_without_previous_removes_entry() {
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let pi = fake_pi(dir.path(), CONNECT_INVALID_JSON);
+
+        let result = connect_pi_provider_in(
+            Some(&pi),
+            &agent,
+            &hub,
+            &connect_req("opencode-go", "sk-test-new-invalid"),
+        )
+        .unwrap();
+
+        assert_eq!(result.check.as_ref().unwrap().status, "invalid");
+        assert!(read_auth(&agent).get("opencode-go").is_none());
+    }
+
+    #[test]
+    fn connect_garbage_check_keeps_key_and_reports_check_error() {
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let pi = fake_pi(dir.path(), "nope");
+        let key = "sk-test-new-garbage";
+
+        let result = connect_pi_provider_in(
+            Some(&pi),
+            &agent,
+            &hub,
+            &connect_req("opencode-go", key),
+        )
+        .unwrap();
+
+        assert!(result.check.is_none());
+        let check_error = result.check_error.as_ref().expect("missing check_error");
+        assert!(!check_error.contains(key), "check_error leaked the key: {check_error}");
+        assert_eq!(read_auth(&agent)["opencode-go"]["key"], key);
+    }
+
+    #[test]
+    fn connect_without_pi_saves_key_unchecked() {
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let key = "sk-test-new-unchecked";
+
+        let result = connect_pi_provider_in(
+            None,
+            &agent,
+            &hub,
+            &connect_req("openrouter", key),
+        )
+        .unwrap();
+
+        assert!(result.check.is_none());
+        assert!(result.check_error.is_none());
+        assert!(!result.status.pi_available);
+        assert_eq!(read_auth(&agent)["openrouter"]["key"], key);
+        assert!(result.status.provider_ready);
+    }
+
+    #[test]
+    fn connect_does_not_touch_settings_or_setup_record() {
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let settings = r#"{"defaultProvider":"openrouter","defaultModel":"m1"}"#;
+        let setup = r#"{"first_run_completed":true,"mode":"pi","provider":"openrouter"}"#;
+        fs::write(agent.join("settings.json"), settings).unwrap();
+        fs::write(hub.join("pi_setup.json"), setup).unwrap();
+        let pi = fake_pi(dir.path(), CONNECT_READY_JSON);
+
+        connect_pi_provider_in(
+            Some(&pi),
+            &agent,
+            &hub,
+            &connect_req("opencode-go", "sk-test-new-settings"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(agent.join("settings.json")).unwrap(),
+            settings
+        );
+        assert_eq!(
+            fs::read_to_string(hub.join("pi_setup.json")).unwrap(),
+            setup
+        );
+    }
+
+    #[test]
+    fn connect_rejects_empty_key_and_bad_slug() {
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+
+        let err = connect_pi_provider_in(None, &agent, &hub, &connect_req("opencode-go", "   "))
+            .unwrap_err();
+        assert_eq!(err, "api key is empty");
+
+        let err = connect_pi_provider_in(None, &agent, &hub, &connect_req("Bad Slug", "sk-test-key"))
+            .unwrap_err();
+        assert!(err.contains("invalid provider"), "{err}");
+
+        assert!(
+            !agent.join("auth.json").exists(),
+            "a rejected connect must not write auth.json"
+        );
+    }
+
+    fn assert_connect_result_hides_key(
+        key: &str,
+        req: &PiConnectProviderRequest,
+        result: &Result<PiConnectResult, String>,
+    ) {
+        assert!(!format!("{req:?}").contains(key), "request Debug leaked the key");
+        match result {
+            Ok(res) => {
+                assert!(!format!("{res:?}").contains(key), "result Debug leaked the key");
+                assert!(
+                    !serde_json::to_string(res).unwrap().contains(key),
+                    "serialized result leaked the key"
+                );
+                if let Some(err) = &res.check_error {
+                    assert!(!err.contains(key), "check_error leaked the key: {err}");
+                }
+            }
+            Err(err) => assert!(!err.contains(key), "Err leaked the key: {err}"),
+        }
+    }
+
+    #[test]
+    fn connect_never_leaks_key() {
+        let key = "sk-test-new-never-leak-9f3";
+
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let pi = fake_pi(dir.path(), CONNECT_READY_JSON);
+        let req = connect_req("opencode-go", key);
+        let result = connect_pi_provider_in(Some(&pi), &agent, &hub, &req);
+        assert_connect_result_hides_key(key, &req, &result);
+
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let pi = fake_pi(dir.path(), CONNECT_INVALID_JSON);
+        let req = connect_req("opencode-go", key);
+        let result = connect_pi_provider_in(Some(&pi), &agent, &hub, &req);
+        assert_connect_result_hides_key(key, &req, &result);
+
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let pi = fake_pi(dir.path(), "nope");
+        let req = connect_req("opencode-go", key);
+        let result = connect_pi_provider_in(Some(&pi), &agent, &hub, &req);
+        assert_connect_result_hides_key(key, &req, &result);
+
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let req = connect_req("openrouter", key);
+        let result = connect_pi_provider_in(None, &agent, &hub, &req);
+        assert_connect_result_hides_key(key, &req, &result);
+
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let req = connect_req("Bad Slug", key);
+        let result = connect_pi_provider_in(None, &agent, &hub, &req);
+        assert!(result.is_err());
+        assert_connect_result_hides_key(key, &req, &result);
+
+        let dir = TempDir::new().unwrap();
+        let (agent, hub) = connect_dirs(dir.path());
+        let req = connect_req("opencode-go", "   ");
+        let result = connect_pi_provider_in(None, &agent, &hub, &req);
+        assert!(result.is_err());
+        assert_connect_result_hides_key(key, &req, &result);
     }
 }

@@ -114,6 +114,7 @@ pub trait CompositorAdapter: Send + Sync {
     fn degraded_reason(&self) -> Option<String>;
     fn float_and_center_pid(&self, pid: u32, width: u32, height: u32) -> Result<(), String>;
     fn capture_pid_region(&self, pid: u32, out_path: &Path) -> Result<(), String>;
+    fn focus_pid(&self, pid: u32) -> Result<(), String>;
     fn focus_godot_editor(&self) -> Result<(), String>;
 }
 
@@ -137,6 +138,10 @@ impl CompositorAdapter for DegradedCompositorAdapter {
 
     fn capture_pid_region(&self, _pid: u32, _out_path: &Path) -> Result<(), String> {
         Err(format!("capture unavailable: {}", self.reason))
+    }
+
+    fn focus_pid(&self, _pid: u32) -> Result<(), String> {
+        Err("focus not supported without Hyprland".to_string())
     }
 
     fn focus_godot_editor(&self) -> Result<(), String> {
@@ -245,6 +250,11 @@ impl CompositorAdapter for HyprlandCompositorAdapter {
         if !status.success() {
             return Err(format!("grim exited with status {status}"));
         }
+        Ok(())
+    }
+
+    fn focus_pid(&self, pid: u32) -> Result<(), String> {
+        self.send_socket_command(&format!("dispatch focuswindow pid:{pid}"))?;
         Ok(())
     }
 

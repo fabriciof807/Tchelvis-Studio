@@ -32,6 +32,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   const updateChannel = useWorkspaceStore((s) => s.updateChannel);
   const setUpdateChannel = useWorkspaceStore((s) => s.setUpdateChannel);
   const piSetupStatus = useWorkspaceStore((s) => s.piSetupStatus);
+  const openProviderDialog = useWorkspaceStore((s) => s.openProviderDialog);
   const theme = useWorkspaceStore((s) => s.theme);
   const setTheme = useWorkspaceStore((s) => s.setTheme);
 
@@ -252,12 +253,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
                 type="button"
                 className="btn-ghost-xs"
                 onClick={() => {
-                  const st = useWorkspaceStore.getState();
-                  if (st.rightCollapsed) {
-                    st.toggleRight();
-                  }
-                  st.setPiSetupOpen(true);
+                  // The dialog is app-level: close Settings first, then open it.
                   onClose();
+                  openProviderDialog();
                 }}
               >
                 {t('piSetup.settingsConfigureBtn')}

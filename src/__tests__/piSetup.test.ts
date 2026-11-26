@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ipc, resetMockPiSetup } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
 
@@ -12,7 +12,8 @@ describe('Pi Durable first-run provider setup', () => {
       oneShotAttachments: [],
       chatMessages: [],
       piSetupStatus: null,
-      piSetupOpen: false,
+      providerDialog: { open: false, preselect: null, hiddenForSignIn: false },
+      providerSignIn: null,
       modelCatalog: null,
       modelCatalogLoading: false,
       modelCatalogError: null,
@@ -23,27 +24,45 @@ describe('Pi Durable first-run provider setup', () => {
     });
   });
 
-  it('opens Pi setup wizard on first-run openWorkspace and blocks normal chat until configured', async () => {
+  it('never opens the provider dialog automatically on first run (S3-1)', async () => {
     await useWorkspaceStore.getState().openWorkspace('/tmp/mock-game');
 
     const afterOpen = useWorkspaceStore.getState();
     expect(afterOpen.piSetupStatus?.first_run_completed).toBe(false);
     expect(afterOpen.piSetupStatus?.needs_setup).toBe(true);
-    expect(afterOpen.piSetupOpen).toBe(true);
+    expect(afterOpen.providerDialog.open).toBe(false);
+
+    useWorkspaceStore.getState().toggleRight();
+    expect(useWorkspaceStore.getState().providerDialog.open).toBe(false);
+
+    await useWorkspaceStore.getState().refreshPiSetupStatus();
+    expect(useWorkspaceStore.getState().providerDialog.open).toBe(false);
+
+    await useWorkspaceStore.getState().configurePiProvider({
+      provider: 'openrouter',
+      model: 'anthropic/claude-sonnet-4.5',
+      api_key: 'sk-test-mock-123',
+      mark_completed: true,
+    });
+    expect(useWorkspaceStore.getState().providerDialog.open).toBe(false);
+  });
+
+  it('a blocked sendChatMessage opens the dialog without posting a system message', async () => {
+    await useWorkspaceStore.getState().openWorkspace('/tmp/mock-game');
 
     await useWorkspaceStore.getState().sendChatMessage('Olá Pi');
     const afterBlockedChat = useWorkspaceStore.getState();
     expect(afterBlockedChat.isSendingChat).toBe(false);
-    expect(afterBlockedChat.piSetupOpen).toBe(true);
+    expect(afterBlockedChat.providerDialog.open).toBe(true);
     expect(
       afterBlockedChat.chatMessages.some((m) => m.role === 'system')
-    ).toBe(true);
+    ).toBe(false);
     expect(
       afterBlockedChat.chatMessages.some((m) => m.role === 'assistant')
     ).toBe(false);
   });
 
-  it('configurePiProvider enables chat and clears needs_setup & piSetupOpen', async () => {
+  it('configurePiProvider enables chat and clears needs_setup & closes the dialog', async () => {
     await useWorkspaceStore.getState().openWorkspace('/tmp/mock-game');
 
     const status = await useWorkspaceStore.getState().configurePiProvider({
@@ -59,7 +78,7 @@ describe('Pi Durable first-run provider setup', () => {
     expect(status.active_model).toBe('anthropic/claude-sonnet-4.5');
 
     const st = useWorkspaceStore.getState();
-    expect(st.piSetupOpen).toBe(false);
+    expect(st.providerDialog.open).toBe(false);
 
     await useWorkspaceStore.getState().sendChatMessage('Criar GDD');
     const afterChat = useWorkspaceStore.getState();
@@ -83,7 +102,7 @@ describe('Pi Durable first-run provider setup', () => {
     expect(status.first_run_completed).toBe(true);
     expect(status.needs_setup).toBe(false);
     expect(status.provider_ready).toBe(false);
-    expect(useWorkspaceStore.getState().piSetupOpen).toBe(false);
+    expect(useWorkspaceStore.getState().providerDialog.open).toBe(false);
   });
 
   it('piListModels falls back to curated suggestions until a provider is connected, then lists its models', async () => {
@@ -172,5 +191,71 @@ describe('Pi Durable first-run provider setup', () => {
     expect(st.modelCatalog).toBe(previous);
     expect(st.modelCatalogError).toBe('boom');
     spy.mockRestore();
+  });
+});
+
+/** In-memory Storage: under Node 26 + jsdom the global `localStorage` is undefined in tests. */
+function createMemoryStorage(): Storage & { snapshot: () => Record<string, string> } {
+  const data = new Map<string, string>();
+  return {
+    get length() {
+      return data.size;
+    },
+    clear: () => data.clear(),
+    getItem: (k) => data.get(k) ?? null,
+    key: (i) => [...data.keys()][i] ?? null,
+    removeItem: (k) => {
+      data.delete(k);
+    },
+    setItem: (k, v) => {
+      data.set(k, String(v));
+    },
+    snapshot: () => Object.fromEntries(data),
+  };
+}
+
+describe('piConnectProvider mock', () => {
+  let storage: ReturnType<typeof createMemoryStorage>;
+
+  beforeEach(() => {
+    storage = createMemoryStorage();
+    vi.stubGlobal('localStorage', storage);
+    resetMockPiSetup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('marks the provider connected when the key is accepted', async () => {
+    const result = await ipc.piConnectProvider({
+      provider: 'openrouter',
+      api_key: 'sk-test-ok',
+    });
+
+    expect(result.check?.status).toBe('ready');
+    expect(result.check?.provider).toBe('openrouter');
+    expect(result.check_error).toBeNull();
+    expect(result.status.configured_providers).toContain('openrouter');
+  });
+
+  it('returns invalid and leaves the provider disconnected when the key is rejected', async () => {
+    const result = await ipc.piConnectProvider({
+      provider: 'openrouter',
+      api_key: 'invalid-x',
+    });
+
+    expect(result.check?.status).toBe('invalid');
+    expect(result.status.configured_providers).not.toContain('openrouter');
+  });
+
+  it('never persists the key in localStorage', async () => {
+    await ipc.piConnectProvider({ provider: 'openrouter', api_key: 'sk-test-ok' });
+    await ipc.piConnectProvider({ provider: 'openai', api_key: 'invalid-x' });
+
+    const stored = JSON.stringify(storage.snapshot());
+    expect(stored).toContain('configured_providers');
+    expect(stored).not.toContain('sk-test-ok');
+    expect(stored).not.toContain('invalid-x');
   });
 });

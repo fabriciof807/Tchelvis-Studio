@@ -4,6 +4,7 @@ import { useWorkspaceStore } from './store/workspaceStore';
 import { useI18n } from './i18n/useI18n';
 import { DockManager } from './docking/DockManager';
 import { SettingsModal } from './components/SettingsModal';
+import { ProviderDialog } from './components/providerDialog/ProviderDialog';
 import { getMediaKind } from './panels/mediaUtils';
 import { FolderIcon, FolderSearchIcon, SettingsIcon } from './components/Icons';
 
@@ -16,8 +17,7 @@ export const App: React.FC = () => {
   const toggleLeft = useWorkspaceStore((s) => s.toggleLeft);
   const toggleRight = useWorkspaceStore((s) => s.toggleRight);
   const toggleBottom = useWorkspaceStore((s) => s.toggleBottom);
-  const startPreview = useWorkspaceStore((s) => s.startPreview);
-  const setPreviewLightboxOpen = useWorkspaceStore((s) => s.setPreviewLightboxOpen);
+  const handlePreviewHotkey = useWorkspaceStore((s) => s.handlePreviewHotkey);
   const handlePiEvent = useWorkspaceStore((s) => s.handlePiEvent);
   const refreshLoopRuns = useWorkspaceStore((s) => s.refreshLoopRuns);
   const refreshFileTree = useWorkspaceStore((s) => s.refreshFileTree);
@@ -40,12 +40,7 @@ export const App: React.FC = () => {
 
       if (e.key === 'F5') {
         e.preventDefault();
-        const status = useWorkspaceStore.getState().previewStatus;
-        if (status?.running) {
-          setPreviewLightboxOpen(true);
-        } else {
-          void startPreview('main');
-        }
+        useWorkspaceStore.getState().handlePreviewHotkey();
         return;
       }
 
@@ -66,7 +61,7 @@ export const App: React.FC = () => {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [toggleLeft, toggleRight, toggleBottom, startPreview, setPreviewLightboxOpen]);
+  }, [toggleLeft, toggleRight, toggleBottom, handlePreviewHotkey]);
 
   // Global Tauri / Mock event subscriptions
   useEffect(() => {
@@ -159,97 +154,105 @@ export const App: React.FC = () => {
 
   if (!workspace) {
     return (
-      <div className="welcome-screen">
-        <div className="welcome-card">
-          <div className="welcome-header">
-            <div className="welcome-top-row">
-              <span className="brand-mark">GAME DEV HUB</span>
+      <>
+        <div className="welcome-screen">
+          <div className="welcome-card">
+            <div className="welcome-header">
+              <div className="welcome-top-row">
+                <span className="brand-mark">GAME DEV HUB</span>
+                <button
+                  type="button"
+                  className="btn-ghost-sm inline-icon-btn"
+                  onClick={() => setSettingsOpen(true)}
+                  title={t('app.settingsTooltip')}
+                >
+                  <SettingsIcon size={14} />
+                  <span>{t('app.settings')}</span>
+                </button>
+              </div>
+              <h1>{t('app.subtitle')}</h1>
+              <p className="muted-text">{t('app.welcomeDesc')}</p>
+            </div>
+
+            <div className="welcome-picker-row">
               <button
                 type="button"
-                className="btn-ghost-sm inline-icon-btn"
-                onClick={() => setSettingsOpen(true)}
-                title={t('app.settingsTooltip')}
+                className="btn-primary-md inline-icon-btn"
+                onClick={() => void handlePickFolder()}
+                disabled={opening}
               >
-                <SettingsIcon size={14} />
-                <span>{t('app.settings')}</span>
+                <FolderSearchIcon size={16} />
+                <span>{opening ? t('app.opening') : t('app.pickFolder')}</span>
               </button>
+
+              <form
+                className="welcome-open-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void handleOpenPath(manualPath);
+                }}
+              >
+                <input
+                  type="text"
+                  className="welcome-input"
+                  value={manualPath}
+                  onChange={(e) => setManualPath(e.target.value)}
+                  placeholder={t('app.pathPlaceholder')}
+                />
+                <button
+                  type="submit"
+                  className="btn-ghost-sm"
+                  disabled={opening || !manualPath.trim()}
+                >
+                  {t('app.open')}
+                </button>
+              </form>
             </div>
-            <h1>{t('app.subtitle')}</h1>
-            <p className="muted-text">{t('app.welcomeDesc')}</p>
-          </div>
 
-          <div className="welcome-picker-row">
-            <button
-              type="button"
-              className="btn-primary-md inline-icon-btn"
-              onClick={() => void handlePickFolder()}
-              disabled={opening}
-            >
-              <FolderSearchIcon size={16} />
-              <span>{opening ? t('app.opening') : t('app.pickFolder')}</span>
-            </button>
+            {openError && <div className="banner-error">{openError}</div>}
 
-            <form
-              className="welcome-open-form"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void handleOpenPath(manualPath);
-              }}
-            >
-              <input
-                type="text"
-                className="welcome-input"
-                value={manualPath}
-                onChange={(e) => setManualPath(e.target.value)}
-                placeholder={t('app.pathPlaceholder')}
-              />
-              <button
-                type="submit"
-                className="btn-ghost-sm"
-                disabled={opening || !manualPath.trim()}
-              >
-                {t('app.open')}
-              </button>
-            </form>
-          </div>
-
-          {openError && <div className="banner-error">{openError}</div>}
-
-          <div className="recent-section">
-            <h2>{t('app.recentProjects')}</h2>
-            {recentWorkspaces.length === 0 ? (
-              <p className="muted-text">{t('app.noRecentProjects')}</p>
-            ) : (
-              <div className="recent-list">
-                {recentWorkspaces.map((item) => (
-                  <button
-                    key={item.path}
-                    type="button"
-                    className="recent-item"
-                    onClick={() => void handleOpenPath(item.path)}
-                  >
-                    <div className="recent-item-left">
-                      <FolderIcon size={16} className="recent-folder-icon" />
-                      <div>
-                        <div className="recent-name">{item.name}</div>
-                        <div className="recent-path">{item.path}</div>
+            <div className="recent-section">
+              <h2>{t('app.recentProjects')}</h2>
+              {recentWorkspaces.length === 0 ? (
+                <p className="muted-text">{t('app.noRecentProjects')}</p>
+              ) : (
+                <div className="recent-list">
+                  {recentWorkspaces.map((item) => (
+                    <button
+                      key={item.path}
+                      type="button"
+                      className="recent-item"
+                      onClick={() => void handleOpenPath(item.path)}
+                    >
+                      <div className="recent-item-left">
+                        <FolderIcon size={16} className="recent-folder-icon" />
+                        <div>
+                          <div className="recent-name">{item.name}</div>
+                          <div className="recent-path">{item.path}</div>
+                        </div>
                       </div>
-                    </div>
-                    <span className="recent-date">
-                      {new Date(item.last_opened).toLocaleDateString(locale)}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
+                      <span className="recent-date">
+                        {new Date(item.last_opened).toLocaleDateString(locale)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
+          <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
         </div>
-        <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      </div>
+        <ProviderDialog />
+      </>
     );
   }
 
-  return <DockManager />;
+  return (
+    <>
+      <DockManager />
+      <ProviderDialog />
+    </>
+  );
 };
 
 export default App;

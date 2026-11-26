@@ -67,6 +67,16 @@ pub fn default_pi_agent_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(".pi/agent"))
 }
 
+/// Explicit Pi directories for the setup commands.
+///
+/// `None` on `AppState` means the defaults (`default_pi_agent_dir()` and
+/// `workspace::config_dir()`); tests inject temp dirs instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiDirs {
+    pub agent_dir: PathBuf,
+    pub hub_config_dir: PathBuf,
+}
+
 /// Binds the local control Unix socket in `$XDG_RUNTIME_DIR/game-hub/<pid>.sock`
 /// with `0600` permissions and a per-boot session token.
 pub struct ControlSocket {

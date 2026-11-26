@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 // ============================================================================
 // Shared IPC Types (100% snake_case matching Rust backend)
@@ -212,6 +213,18 @@ export interface PiAuthCheckResult {
   reason: string | null;
 }
 
+/** Saves an API key and verifies it; never carries the key back to the UI. */
+export interface PiConnectProviderRequest {
+  provider: string;
+  api_key: string;
+}
+
+export interface PiConnectResult {
+  status: PiSetupStatus;
+  check: PiAuthCheckResult | null;
+  check_error: string | null;
+}
+
 export interface SaveCaptureResult {
   rel_path: string;
   total_captures_bytes: number;
@@ -279,22 +292,65 @@ export interface LensInfo {
   rel_path: string;
 }
 
+export type PreviewEngine = 'web' | 'godot';
+
 export interface PreviewStatus {
   running: boolean;
-  mode: 'main' | 'staging' | string;
-  engine: 'web' | 'godot' | string;
-  url?: string | null;
-  pid?: number | null;
-  worktree_path?: string | null;
+  mode: 'main' | 'staging' | 'idle';
+  engine: PreviewEngine | null;
+  url: string | null;
+  pid: number | null;
+  worktree_path: string | null;
   compositor_available: boolean;
   can_capture: boolean;
-  degraded_reason?: string | null;
+  degraded_reason: string | null;
   logs: string[];
 }
 
+/** Wire keys pinned by the Rust serde test; keep both sides in sync. */
+export const PREVIEW_STATUS_KEYS = [
+  'running',
+  'mode',
+  'engine',
+  'url',
+  'pid',
+  'worktree_path',
+  'compositor_available',
+  'can_capture',
+  'degraded_reason',
+  'logs',
+] as const;
+
+const IDLE_PREVIEW_STATUS: PreviewStatus = {
+  running: false,
+  mode: 'idle',
+  engine: null,
+  url: null,
+  pid: null,
+  worktree_path: null,
+  compositor_available: false,
+  can_capture: false,
+  degraded_reason: null,
+  logs: [],
+};
+
+/** Builds a `PreviewStatus` from the idle shape, so mocks can't drift from the contract. */
+export function mockPreviewStatus(over: Partial<PreviewStatus> = {}): PreviewStatus {
+  return { ...IDLE_PREVIEW_STATUS, ...over };
+}
+
 export interface PreviewCaptureResult {
-  image_path: string;
+  image_path: string | null;
   log_tail: string[];
+  error: string | null;
+}
+
+/** Physical rectangle of the Hub window, used to place a Godot preview over it. */
+export interface HubWindowRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface BrowserBounds {
@@ -378,6 +434,18 @@ export function safeConvertFileSrc(filePath: string): string {
     return convertFileSrc(filePath);
   }
   return filePath;
+}
+
+/** Reads the Hub's physical window rectangle; `null` outside Tauri or on error. */
+async function currentHubWindowRect(): Promise<HubWindowRect | null> {
+  if (!isTauriEnv()) return null;
+  try {
+    const win = getCurrentWindow();
+    const [position, size] = await Promise.all([win.outerPosition(), win.outerSize()]);
+    return { x: position.x, y: position.y, width: size.width, height: size.height };
+  } catch {
+    return null;
+  }
 }
 
 // Simple in-memory event bus for browser / Vitest fallback
@@ -975,10 +1043,11 @@ export const ipc = {
 
   async previewStart(mode: 'main' | 'staging', worktreePath?: string): Promise<PreviewStatus> {
     if (isTauriEnv()) {
-      return invoke<PreviewStatus>('preview_start', { mode, worktreePath });
+      const hubRect = await currentHubWindowRect();
+      return invoke<PreviewStatus>('preview_start', { mode, worktreePath, hubRect });
     }
     mockPreviewRunning = true;
-    return {
+    return mockPreviewStatus({
       running: true,
       mode,
       engine: 'web',
@@ -989,7 +1058,22 @@ export const ipc = {
       can_capture: true,
       degraded_reason: 'Modo navegador (mock sem servidor Vite secundário)',
       logs: ['[preview] Servidor mock iniciado em modo ' + mode],
-    };
+    });
+  },
+
+  async previewStatus(): Promise<PreviewStatus> {
+    if (isTauriEnv()) {
+      return invoke<PreviewStatus>('preview_status');
+    }
+    if (!mockPreviewRunning) return mockPreviewStatus({});
+    return mockPreviewStatus({
+      running: true,
+      mode: 'main',
+      engine: 'web',
+      url: 'about:blank',
+      pid: 99999,
+      can_capture: true,
+    });
   },
 
   async previewStop(): Promise<void> {
@@ -997,6 +1081,12 @@ export const ipc = {
       return invoke<void>('preview_stop');
     }
     mockPreviewRunning = false;
+  },
+
+  async previewFocus(): Promise<void> {
+    if (isTauriEnv()) {
+      return invoke<void>('preview_focus');
+    }
   },
 
   async previewCapture(): Promise<PreviewCaptureResult> {
@@ -1009,6 +1099,7 @@ export const ipc = {
     return {
       image_path: `.hub/captures/preview-${Date.now()}.png`,
       log_tail: ['[preview] Frame capturado (mock)'],
+      error: null,
     };
   },
 
@@ -1357,6 +1448,60 @@ export const ipc = {
     status.needs_setup = !status.first_run_completed || !status.provider_ready;
     saveMockPiSetup(status);
     return status;
+  },
+
+  async piConnectProvider(req: PiConnectProviderRequest): Promise<PiConnectResult> {
+    if (isTauriEnv()) {
+      return invoke<PiConnectResult>('pi_connect_provider', { req });
+    }
+    const status = loadMockPiSetup();
+    const key = req.api_key.trim();
+    if (key.startsWith('invalid-')) {
+      return {
+        status,
+        check: {
+          status: 'invalid',
+          provider: req.provider,
+          auth_type: 'api_key',
+          reason: 'credentials_rejected',
+        },
+        check_error: null,
+      };
+    }
+    const target = status.providers.find((p) => p.id === req.provider);
+    if (target) {
+      target.configured = true;
+      target.auth_type = 'api_key';
+    } else {
+      status.providers.push({
+        id: req.provider,
+        label: req.provider,
+        supports_api_key: true,
+        supports_oauth: true,
+        configured: true,
+        auth_type: 'api_key',
+        env_var_hint: null,
+        suggested_models: [],
+      });
+    }
+    if (!status.configured_providers.includes(req.provider)) {
+      status.configured_providers.push(req.provider);
+    }
+    if (status.active_provider === req.provider) {
+      status.provider_ready = true;
+    }
+    status.needs_setup = !status.first_run_completed || !status.provider_ready;
+    saveMockPiSetup(status);
+    return {
+      status,
+      check: {
+        status: 'ready',
+        provider: req.provider,
+        auth_type: 'api_key',
+        reason: null,
+      },
+      check_error: null,
+    };
   },
 
   async piLogoutProvider(provider: string): Promise<PiSetupStatus> {

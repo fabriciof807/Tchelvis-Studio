@@ -1,7 +1,7 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { ipc, type LoopRunState } from '../types/ipc';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { ipc, mockPreviewStatus, type LoopRunState, type PreviewStatus } from '../types/ipc';
 import { useWorkspaceStore } from '../store/workspaceStore';
 import { LoopsPanel } from '../panels/LoopsPanel';
 
@@ -27,6 +27,9 @@ describe('Tchelvis loop IPC mocks, /loop chat command & LoopsPanel', () => {
       oneShotAttachments: [],
       pendingPanelRequest: null,
       previewStatus: null,
+      previewPhase: 'idle',
+      previewError: null,
+      lastPreviewRequest: null,
       isSendingChat: false,
       locale: 'pt-BR',
     });
@@ -253,5 +256,251 @@ describe('Tchelvis loop IPC mocks, /loop chat command & LoopsPanel', () => {
     checkMergeSpy.mockRestore();
     mergeSpy.mockRestore();
     listRunsSpy.mockRestore();
+  });
+
+  it('does not report staging success when the preview start fails', async () => {
+    const stagingRun: LoopRunState = {
+      run_id: '20261125-040000-fail',
+      workflow: 'fast-worker-reviewer',
+      title: 'Staging com falha',
+      status: 'running',
+      raw_status: 'RUNNING',
+      branch: 'loop/fast-worker-reviewer-20261125-040000-fail',
+      worktree_path: '/tmp/wt-fail',
+      current_stage: 'implement',
+      current_cycle: 1,
+      max_cycles: 2,
+      created_at: '2026-11-25T04:00:00Z',
+      updated_at: '2026-11-25T04:00:00Z',
+      stages: [],
+      files: [],
+    };
+    useWorkspaceStore.setState({
+      loopRuns: [stagingRun],
+      previewPhase: 'idle',
+      previewStatus: null,
+      previewError: null,
+      lastPreviewRequest: null,
+    });
+    vi.spyOn(ipc, 'previewStart').mockRejectedValueOnce(new Error('healthcheck timed out'));
+    vi.spyOn(ipc, 'previewStatus').mockResolvedValueOnce(mockPreviewStatus({ logs: [] }));
+
+    render(
+      React.createElement(LoopsPanel, {
+        params: { runId: stagingRun.run_id },
+        api: {} as never,
+        containerApi: {} as never,
+      })
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Iniciar Staging' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('healthcheck timed out')).toBeTruthy();
+    });
+    expect(screen.queryByText(/Staging iniciado/)).toBeNull();
+  });
+
+  it('does not report capture success when the capture fails', async () => {
+    const stagingRun: LoopRunState = {
+      run_id: '20261125-041000-capture',
+      workflow: 'fast-worker-reviewer',
+      title: 'Captura com falha',
+      status: 'running',
+      raw_status: 'RUNNING',
+      branch: 'loop/fast-worker-reviewer-20261125-041000-capture',
+      worktree_path: '/tmp/wt-capture',
+      current_stage: 'implement',
+      current_cycle: 1,
+      max_cycles: 2,
+      created_at: '2026-11-25T04:10:00Z',
+      updated_at: '2026-11-25T04:10:00Z',
+      stages: [],
+      files: [],
+    };
+    useWorkspaceStore.setState({
+      loopRuns: [stagingRun],
+      previewPhase: 'running',
+      previewStatus: mockPreviewStatus({
+        running: true,
+        mode: 'staging',
+        engine: 'web',
+        worktree_path: '/tmp/wt-capture',
+        can_capture: true,
+      }),
+      previewError: null,
+    });
+    vi.spyOn(ipc, 'previewCapture').mockRejectedValueOnce(new Error('grim not found'));
+
+    render(
+      React.createElement(LoopsPanel, {
+        params: { runId: stagingRun.run_id },
+        api: {} as never,
+        containerApi: {} as never,
+      })
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Capturar Frame + Log' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('grim not found')).toBeTruthy();
+    });
+    expect(screen.queryByText(/Frame \+ log anexados/)).toBeNull();
+  });
+
+  it('does not report staging error or success when the start is cancelled', async () => {
+    const stagingRun: LoopRunState = {
+      run_id: '20261125-043000-cancel',
+      workflow: 'fast-worker-reviewer',
+      title: 'Staging cancelado',
+      status: 'running',
+      raw_status: 'RUNNING',
+      branch: 'loop/fast-worker-reviewer-20261125-043000-cancel',
+      worktree_path: '/tmp/wt-cancel',
+      current_stage: 'implement',
+      current_cycle: 1,
+      max_cycles: 2,
+      created_at: '2026-11-25T04:30:00Z',
+      updated_at: '2026-11-25T04:30:00Z',
+      stages: [],
+      files: [],
+    };
+    useWorkspaceStore.setState({
+      loopRuns: [stagingRun],
+      previewPhase: 'idle',
+      previewStatus: null,
+      previewError: null,
+      lastPreviewRequest: null,
+    });
+
+    let resolveStart!: (value: PreviewStatus) => void;
+    vi.spyOn(ipc, 'previewStart').mockImplementation(
+      () => new Promise<PreviewStatus>((resolve) => {
+        resolveStart = resolve;
+      })
+    );
+    vi.spyOn(ipc, 'previewStop').mockResolvedValue(undefined);
+
+    const { container } = render(
+      React.createElement(LoopsPanel, {
+        params: { runId: stagingRun.run_id },
+        api: {} as never,
+        containerApi: {} as never,
+      })
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Iniciar Staging' }));
+    await waitFor(() => expect(resolveStart).toBeTypeOf('function'));
+
+    await act(async () => {
+      await useWorkspaceStore.getState().cancelPreviewStart();
+      resolveStart(mockPreviewStatus({ running: true, mode: 'staging', engine: 'web' }));
+    });
+
+    await waitFor(() => expect(container.querySelector('.banner-info')).toBeNull());
+    expect(container.querySelector('.banner-error')).toBeNull();
+    expect(screen.queryByText(/Staging iniciado/)).toBeNull();
+  });
+
+  it('does not report capture success when the capture fails without an error string', async () => {
+    const stagingRun: LoopRunState = {
+      run_id: '20261125-044000-silent',
+      workflow: 'fast-worker-reviewer',
+      title: 'Captura silenciosa',
+      status: 'running',
+      raw_status: 'RUNNING',
+      branch: 'loop/fast-worker-reviewer-20261125-044000-silent',
+      worktree_path: '/tmp/wt-silent',
+      current_stage: 'implement',
+      current_cycle: 1,
+      max_cycles: 2,
+      created_at: '2026-11-25T04:40:00Z',
+      updated_at: '2026-11-25T04:40:00Z',
+      stages: [],
+      files: [],
+    };
+    useWorkspaceStore.setState({
+      loopRuns: [stagingRun],
+      previewPhase: 'running',
+      previewStatus: mockPreviewStatus({
+        running: true,
+        mode: 'staging',
+        engine: 'web',
+        worktree_path: '/tmp/wt-silent',
+        can_capture: true,
+      }),
+      previewError: null,
+    });
+    vi.spyOn(ipc, 'previewCapture').mockResolvedValue({
+      image_path: null,
+      log_tail: [],
+      error: null,
+    });
+
+    render(
+      React.createElement(LoopsPanel, {
+        params: { runId: stagingRun.run_id },
+        api: {} as never,
+        containerApi: {} as never,
+      })
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Capturar Frame + Log' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Falha ao capturar o frame')).toBeTruthy();
+    });
+    expect(screen.queryByText(/Frame \+ log anexados/)).toBeNull();
+  });
+
+  it('stops a preview that is still starting before merging', async () => {
+    const completedRun: LoopRunState = {
+      run_id: '20261125-042000-starting',
+      workflow: 'fast-worker-reviewer',
+      title: 'Merge durante start',
+      status: 'completed',
+      raw_status: 'PASS',
+      branch: 'loop/fast-worker-reviewer-20261125-042000-starting',
+      worktree_path: '/tmp/wt-starting',
+      current_stage: 'review',
+      current_cycle: 1,
+      max_cycles: 2,
+      created_at: '2026-11-25T04:20:00Z',
+      updated_at: '2026-11-25T04:21:00Z',
+      stages: [],
+      files: [],
+    };
+    useWorkspaceStore.setState({
+      loopRuns: [completedRun],
+      previewPhase: 'starting',
+      previewStatus: mockPreviewStatus({ running: false, mode: 'staging', pid: 4321 }),
+      previewError: null,
+    });
+    const stopSpy = vi.spyOn(ipc, 'previewStop').mockResolvedValue(undefined);
+    vi.spyOn(ipc, 'gitCheckWorktreeMerge').mockResolvedValueOnce({
+      can_merge: true,
+      can_merge_cleanly: true,
+      dirty_files: [],
+      colliding_files: [],
+      conflicting_dirty_files: [],
+      requires_stash: false,
+      worktree_path: '/tmp/wt-starting',
+      branch: completedRun.branch!,
+    });
+    vi.spyOn(ipc, 'gitMergeWorktree').mockResolvedValueOnce({
+      merged: true,
+      stashed: false,
+      message: 'Merged branch',
+    });
+    vi.spyOn(ipc, 'listLoopRuns').mockResolvedValue([completedRun]);
+
+    render(
+      React.createElement(LoopsPanel, {
+        params: { runId: completedRun.run_id },
+        api: {} as never,
+        containerApi: {} as never,
+      })
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Aprovar & Integrar' }));
+
+    await waitFor(() => {
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -15,11 +15,11 @@ use fs_watcher::{
     list_loop_runs, read_loop_report, reconcile_offline_completed_runs, EchoSuppressionCache,
     LoopStateCache, WorkspaceWatcher,
 };
-use preview::PreviewManager;
+use preview::{PreviewLauncher, PreviewManager, SystemPreviewLauncher};
 use pty::PtyManager;
 use sidecar::{
     create_pi_adapter, list_lenses, publish_lens, read_lens_html, ControlSocket,
-    DefaultTchelvisAdapter, PiCancelToken, PiSidecarAdapter, TchelvisAdapter,
+    DefaultTchelvisAdapter, PiCancelToken, PiDirs, PiSidecarAdapter, TchelvisAdapter,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -27,10 +27,11 @@ use std::time::Duration;
 use types::{
     AmbientEnvelope, BrowserBounds, BrowserPanelState, BrowserSnapshotResult, CaptureResult,
     CaptureSaved, DispatchLoopOptions, FileTreeNode, FlowBridgeCallbackPayload,
-    FlowGenerationResult, GlobalConfig, LensInfo, LoopCheckResult, LoopRunState, LoopWorkflowInfo,
-    MarkdownFilePayload, MergeCheckResult, MergeResult, PiAuthCheckResult,
-    PiConfigureProviderRequest, PiModelCatalog, PiSetupStatus, PiTurnAck, PreviewStatus, ProjectConfig,
-    RecentWorkspace, UpdateApplyResult, UpdateCheckResult, WorkspaceInfo, WriteMarkdownResult,
+    FlowGenerationResult, GlobalConfig, HubWindowRect, LensInfo, LoopCheckResult, LoopRunState,
+    LoopWorkflowInfo, MarkdownFilePayload, MergeCheckResult, MergeResult, PiAuthCheckResult,
+    PiConfigureProviderRequest, PiConnectProviderRequest, PiConnectResult, PiModelCatalog,
+    PiSetupStatus, PiTurnAck, PreviewEngine, PreviewStatus, ProjectConfig, RecentWorkspace,
+    UpdateApplyResult, UpdateCheckResult, WorkspaceInfo, WriteMarkdownResult,
 };
 
 /// Shared microkernel state used by both headless tests and Tauri desktop IPC.
@@ -44,8 +45,11 @@ pub struct AppState {
     pub pi_adapter: Mutex<Box<dyn PiSidecarAdapter>>,
     /// Stops a running turn without waiting for `pi_adapter`, which the turn holds for its whole length.
     pub pi_cancel: PiCancelToken,
+    /// Pi directories for the setup commands; `None` uses `default_pi_agent_dir()`/`config_dir()`.
+    pub pi_dirs: Option<PiDirs>,
     pub tchelvis: Box<dyn TchelvisAdapter>,
     pub preview_manager: Mutex<PreviewManager>,
+    pub preview_launcher: Box<dyn PreviewLauncher>,
     pub compositor: Box<dyn CompositorAdapter>,
     pub watcher: Mutex<Option<WorkspaceWatcher>>,
     pub control_socket: Mutex<Option<ControlSocket>>,
@@ -75,8 +79,10 @@ impl AppState {
             pty_manager: PtyManager::new(),
             pi_adapter: Mutex::new(pi_adapter),
             pi_cancel,
+            pi_dirs: None,
             tchelvis,
             preview_manager: Mutex::new(PreviewManager::new()),
+            preview_launcher: Box::new(SystemPreviewLauncher),
             compositor,
             watcher: Mutex::new(None),
             control_socket: Mutex::new(control_socket),
@@ -107,6 +113,14 @@ impl AppState {
             .ok()
             .and_then(|g| g.as_ref().map(|c| c.game_dir.clone()))
             .unwrap_or_else(|| "game".to_string())
+    }
+
+    /// The configured preview engine, or `None` when `.hub/project.json` does not name one.
+    pub fn project_engine(&self) -> Option<String> {
+        self.project_config
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.engine.clone()))
     }
 }
 
@@ -297,11 +311,17 @@ pub fn cmd_pi_send_message(
     state: &AppState,
     envelope: AmbientEnvelope,
 ) -> Result<PiTurnAck, String> {
+    let bin_name = configured_pi_bin_name(state);
     let root = state.active_root()?;
     let mut pi = state
         .pi_adapter
         .lock()
         .map_err(|_| "pi_adapter mutex poisoned".to_string())?;
+    // Lazy upgrade: configure no longer blocks on this lock, so an adapter created while pi was
+    // missing is swapped here, under the lock this turn already holds.
+    if pi.mode() == "offline" && sidecar::resolve_pi_binary(&bin_name).is_some() {
+        *pi = create_pi_adapter(&bin_name, &state.pi_cancel);
+    }
     pi.send_message(&root, &envelope)
 }
 
@@ -313,14 +333,30 @@ fn configured_pi_bin_name(state: &AppState) -> String {
         .unwrap_or_else(|_| "pi".to_string())
 }
 
+/// Pi directories for the setup commands, defaulting to `~/.pi/agent` and the hub config dir.
+fn state_pi_dirs(state: &AppState) -> Result<PiDirs, String> {
+    match &state.pi_dirs {
+        Some(dirs) => Ok(dirs.clone()),
+        None => Ok(PiDirs {
+            agent_dir: sidecar::default_pi_agent_dir()?,
+            hub_config_dir: workspace::config_dir()?,
+        }),
+    }
+}
+
 pub fn cmd_pi_get_setup_status(state: &AppState) -> Result<PiSetupStatus, String> {
     let bin_name = configured_pi_bin_name(state);
-    sidecar::get_pi_setup_status(&bin_name)
+    let pi_bin = sidecar::resolve_pi_binary(&bin_name);
+    let dirs = state_pi_dirs(state)?;
+    sidecar::get_pi_setup_status_in(pi_bin.as_deref(), &dirs.agent_dir, &dirs.hub_config_dir)
 }
 
 pub fn cmd_pi_check_provider(state: &AppState, provider: String) -> Result<PiAuthCheckResult, String> {
     let bin_name = configured_pi_bin_name(state);
-    sidecar::check_pi_provider(&bin_name, &provider)
+    let pi_bin = sidecar::resolve_pi_binary(&bin_name)
+        .ok_or_else(|| format!("Pi CLI binary '{bin_name}' not found in $PATH"))?;
+    let dirs = state_pi_dirs(state)?;
+    sidecar::check_pi_provider_auth(&pi_bin, &dirs.agent_dir, &provider)
 }
 
 pub fn cmd_pi_configure_provider(
@@ -328,25 +364,54 @@ pub fn cmd_pi_configure_provider(
     req: PiConfigureProviderRequest,
 ) -> Result<PiSetupStatus, String> {
     let bin_name = configured_pi_bin_name(state);
-    let status = sidecar::configure_pi_provider(&bin_name, &req)?;
-    if status.pi_available {
-        if let Ok(mut pi) = state.pi_adapter.lock() {
-            if pi.mode() == "offline" {
-                *pi = create_pi_adapter(&bin_name, &state.pi_cancel);
-            }
-        }
-    }
-    Ok(status)
+    let pi_bin = sidecar::resolve_pi_binary(&bin_name);
+    let dirs = state_pi_dirs(state)?;
+    // Never takes the adapter lock: a running turn holds it for up to 180 s. The offline adapter
+    // is upgraded lazily by `cmd_pi_send_message` instead.
+    sidecar::configure_pi_provider_in(
+        pi_bin.as_deref(),
+        &dirs.agent_dir,
+        &dirs.hub_config_dir,
+        &req,
+    )
+}
+
+pub fn cmd_pi_connect_provider(
+    state: &AppState,
+    req: PiConnectProviderRequest,
+) -> Result<PiConnectResult, String> {
+    let bin_name = configured_pi_bin_name(state);
+    let pi_bin = sidecar::resolve_pi_binary(&bin_name);
+    let dirs = state_pi_dirs(state)?;
+    sidecar::connect_pi_provider_in(
+        pi_bin.as_deref(),
+        &dirs.agent_dir,
+        &dirs.hub_config_dir,
+        &req,
+    )
 }
 
 pub fn cmd_pi_list_models(state: &AppState) -> Result<PiModelCatalog, String> {
     let bin_name = configured_pi_bin_name(state);
-    sidecar::list_pi_models(&bin_name)
+    let pi_bin = sidecar::resolve_pi_binary(&bin_name);
+    let dirs = state_pi_dirs(state)?;
+    Ok(sidecar::list_pi_models_in(
+        pi_bin.as_deref(),
+        &dirs.agent_dir,
+        Duration::from_secs(10),
+    ))
 }
 
 pub fn cmd_pi_logout_provider(state: &AppState, provider: String) -> Result<PiSetupStatus, String> {
     let bin_name = configured_pi_bin_name(state);
-    sidecar::logout_pi_provider(&bin_name, &provider)
+    let pi_bin = sidecar::resolve_pi_binary(&bin_name);
+    let dirs = state_pi_dirs(state)?;
+    sidecar::logout_pi_provider_in(
+        pi_bin.as_deref(),
+        &dirs.agent_dir,
+        &dirs.hub_config_dir,
+        &provider,
+    )
 }
 
 pub fn cmd_save_capture(
@@ -439,7 +504,15 @@ pub fn cmd_preview_start(
     state: &AppState,
     mode: String,
     worktree_path: Option<String>,
+    hub_rect: Option<HubWindowRect>,
 ) -> Result<PreviewStatus, String> {
+    if mode != "main" && mode != "staging" {
+        return Err(format!("unsupported preview mode: {mode}"));
+    }
+    if mode == "staging" && worktree_path.is_none() {
+        return Err("staging preview requires a worktree path".to_string());
+    }
+
     let root = state.active_root()?;
     let game_dir = state.game_dir();
     let (timeout_ms, width, height) = state
@@ -455,37 +528,236 @@ pub fn cmd_preview_start(
         .unwrap_or((10_000, 1280, 720));
 
     let wt_path = worktree_path.as_deref().map(Path::new);
+    let base = wt_path.unwrap_or(&root);
+    let project_dir = base.join(&game_dir);
+    if !project_dir.exists() {
+        return Err(format!(
+            "game directory does not exist: {}",
+            project_dir.display()
+        ));
+    }
+
+    // Same tree means the existing preview wins (no second process on double F5), unless the
+    // previous process has already exited. Capture the generation before the import below, so a
+    // Cancel pressed meanwhile aborts the start instead of spawning behind the user's back.
+    let start_generation = {
+        let mut pm = state
+            .preview_manager
+            .lock()
+            .map_err(|_| "preview_manager mutex poisoned".to_string())?;
+        if pm.is_active_for(&mode, worktree_path.as_deref()) {
+            let (status, retired) = preview_status_and_retired(state, &mut pm);
+            drop(pm);
+            preview::join_log_readers(retired);
+            return Ok(status);
+        }
+        pm.start_generation()
+    };
+
+    let resolution =
+        preview::resolve_preview_engine(state.project_engine().as_deref(), &project_dir)?;
+
+    if resolution.engine == PreviewEngine::Godot {
+        if let Some(wt) = wt_path {
+            let copied = preview::sync_godot_imported_cache(&root, wt, &game_dir)?;
+            if copied {
+                if let Some(godot_bin) = sidecar::find_binary_in_path("godot") {
+                    let _ = std::process::Command::new(godot_bin)
+                        .arg("--headless")
+                        .arg("--path")
+                        .arg(&project_dir)
+                        .arg("--import")
+                        .status();
+                }
+            }
+        }
+    }
+
+    let (spec, port, godot_rect) = match resolution.engine {
+        PreviewEngine::Godot => {
+            let rect = preview::godot_window_rect(hub_rect, width, height);
+            let args = preview::godot_args(&project_dir, rect, hub_rect.is_some());
+            (
+                preview::LaunchSpec {
+                    engine: PreviewEngine::Godot,
+                    project_dir: project_dir.clone(),
+                    args,
+                },
+                None,
+                Some(rect),
+            )
+        }
+        PreviewEngine::Web => {
+            let port = preview::allocate_free_port()?;
+            (
+                preview::LaunchSpec {
+                    engine: PreviewEngine::Web,
+                    project_dir: project_dir.clone(),
+                    args: preview::web_args(port),
+                },
+                Some(port),
+                None,
+            )
+        }
+    };
+
+    let placement = godot_rect.and_then(|_| {
+        preview::placement_warning(
+            std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+            state.compositor.backend_name(),
+        )
+    });
+    let warning = join_optional_warnings(resolution.warning, placement);
+
     let mut pm = state
         .preview_manager
         .lock()
         .map_err(|_| "preview_manager mutex poisoned".to_string())?;
+    // A concurrent start may have won the race while the lock was released.
+    if pm.is_active_for(&mode, worktree_path.as_deref()) {
+        let (status, retired) = preview_status_and_retired(state, &mut pm);
+        drop(pm);
+        preview::join_log_readers(retired);
+        return Ok(status);
+    }
+    // Cancel during the import/engine probe: no process may start now.
+    if pm.start_generation() != start_generation {
+        return Err(preview::START_CANCELLED.to_string());
+    }
+    // Replacing another tree is intentional, so use the generation after `stop`.
+    pm.stop();
+    let generation = pm.start_generation();
+    let pid = pm.begin(
+        state.preview_launcher.as_ref(),
+        spec,
+        &mode,
+        worktree_path.as_deref(),
+        port,
+        warning,
+        generation,
+    )?;
 
-    match mode.as_str() {
-        "web" | "vite" => pm.start_web(
-            &root,
-            wt_path,
-            &game_dir,
-            Duration::from_millis(timeout_ms),
-            state.compositor.as_ref(),
-        ),
-        "godot" | "staging" => pm.start_godot(
-            &root,
-            wt_path,
-            &game_dir,
-            width,
-            height,
-            state.compositor.as_ref(),
-        ),
-        _ => Err(format!("unsupported preview mode: {mode}")),
+    if let Some(rect) = godot_rect {
+        let (status, retired) = preview_status_and_retired(state, &mut pm);
+        drop(pm);
+        preview::join_log_readers(retired);
+        let _ = state
+            .compositor
+            .float_and_center_pid(pid, rect.width, rect.height);
+        return Ok(status);
+    }
+
+    let Some(port) = port else {
+        let (status, retired) = preview_status_and_retired(state, &mut pm);
+        drop(pm);
+        preview::join_log_readers(retired);
+        return Ok(status);
+    };
+
+    let retired = pm.take_retired();
+    // The healthcheck can take seconds; drop the lock so Stop/Cancel and polling stay responsive.
+    drop(pm);
+    preview::join_log_readers(retired);
+    match state
+        .preview_launcher
+        .wait_ready(port, Duration::from_millis(timeout_ms))
+    {
+        Ok(()) => {
+            let mut pm = state
+                .preview_manager
+                .lock()
+                .map_err(|_| "preview_manager mutex poisoned".to_string())?;
+            if !pm.mark_ready(pid) {
+                return Err(preview::START_CANCELLED.to_string());
+            }
+            let (status, retired) = preview_status_and_retired(state, &mut pm);
+            drop(pm);
+            preview::join_log_readers(retired);
+            Ok(status)
+        }
+        Err(err) => {
+            let mut pm = state
+                .preview_manager
+                .lock()
+                .map_err(|_| "preview_manager mutex poisoned".to_string())?;
+            pm.fail(pid);
+            let retired = pm.take_retired();
+            drop(pm);
+            preview::join_log_readers(retired);
+            Err(err)
+        }
+    }
+}
+
+fn preview_status_and_retired(
+    state: &AppState,
+    pm: &mut PreviewManager,
+) -> (PreviewStatus, Vec<std::thread::JoinHandle<()>>) {
+    (
+        pm.status(state.compositor.as_ref()),
+        pm.take_retired(),
+    )
+}
+
+pub fn cmd_preview_status(state: &AppState) -> Result<PreviewStatus, String> {
+    let (status, retired) = {
+        let mut pm = state
+            .preview_manager
+            .lock()
+            .map_err(|_| "preview_manager mutex poisoned".to_string())?;
+        preview_status_and_retired(state, &mut pm)
+    };
+    if retired.is_empty() {
+        return Ok(status);
+    }
+    // A reaped child's log readers may still be draining; join them off-lock and read again so
+    // the first idle status already carries the complete tail.
+    preview::join_log_readers(retired);
+    let mut pm = state
+        .preview_manager
+        .lock()
+        .map_err(|_| "preview_manager mutex poisoned".to_string())?;
+    Ok(pm.status(state.compositor.as_ref()))
+}
+
+pub fn cmd_preview_focus(state: &AppState) -> Result<(), String> {
+    let (pid, retired) = {
+        let mut pm = state
+            .preview_manager
+            .lock()
+            .map_err(|_| "preview_manager mutex poisoned".to_string())?;
+        let (status, retired) = preview_status_and_retired(state, &mut pm);
+        (
+            status
+                .pid
+                .ok_or_else(|| "no active preview running".to_string())?,
+            retired,
+        )
+    };
+    preview::join_log_readers(retired);
+    state.compositor.focus_pid(pid)
+}
+
+/// Joins two optional warnings with `; `, dropping empty ones.
+fn join_optional_warnings(first: Option<String>, second: Option<String>) -> Option<String> {
+    let parts: Vec<String> = [first, second].into_iter().flatten().collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
     }
 }
 
 pub fn cmd_preview_stop(state: &AppState) -> Result<(), String> {
-    let mut pm = state
-        .preview_manager
-        .lock()
-        .map_err(|_| "preview_manager mutex poisoned".to_string())?;
-    pm.stop();
+    let retired = {
+        let mut pm = state
+            .preview_manager
+            .lock()
+            .map_err(|_| "preview_manager mutex poisoned".to_string())?;
+        pm.stop();
+        pm.take_retired()
+    };
+    preview::join_log_readers(retired);
     Ok(())
 }
 
@@ -845,6 +1117,14 @@ mod desktop_ipc {
     }
 
     #[tauri::command]
+    pub async fn pi_connect_provider(
+        app: tauri::AppHandle,
+        req: PiConnectProviderRequest,
+    ) -> Result<PiConnectResult, String> {
+        on_worker(move || cmd_pi_connect_provider(&app.state::<AppState>(), req)).await
+    }
+
+    #[tauri::command]
     pub async fn pi_logout_provider(
         app: tauri::AppHandle,
         provider: String,
@@ -931,17 +1211,31 @@ mod desktop_ipc {
     }
 
     #[tauri::command]
-    pub fn preview_start(
-        state: State<'_, AppState>,
+    pub async fn preview_start(
+        app: tauri::AppHandle,
         mode: String,
         worktree_path: Option<String>,
+        hub_rect: Option<HubWindowRect>,
     ) -> Result<PreviewStatus, String> {
-        cmd_preview_start(&state, mode, worktree_path)
+        on_worker(move || {
+            cmd_preview_start(&app.state::<AppState>(), mode, worktree_path, hub_rect)
+        })
+        .await
     }
 
     #[tauri::command]
-    pub fn preview_stop(state: State<'_, AppState>) -> Result<(), String> {
-        cmd_preview_stop(&state)
+    pub async fn preview_status(app: tauri::AppHandle) -> Result<PreviewStatus, String> {
+        on_worker(move || cmd_preview_status(&app.state::<AppState>())).await
+    }
+
+    #[tauri::command]
+    pub async fn preview_stop(app: tauri::AppHandle) -> Result<(), String> {
+        on_worker(move || cmd_preview_stop(&app.state::<AppState>())).await
+    }
+
+    #[tauri::command]
+    pub fn preview_focus(state: State<'_, AppState>) -> Result<(), String> {
+        cmd_preview_focus(&state)
     }
 
     #[tauri::command]
@@ -1262,6 +1556,7 @@ mod desktop_ipc {
                 pi_list_models,
                 pi_check_provider,
                 pi_configure_provider,
+                pi_connect_provider,
                 pi_logout_provider,
                 save_capture,
                 list_lenses,
@@ -1274,7 +1569,9 @@ mod desktop_ipc {
                 dispatch_loop,
                 stop_loop,
                 preview_start,
+                preview_status,
                 preview_stop,
+                preview_focus,
                 preview_capture,
                 git_check_worktree_merge,
                 git_merge_worktree,
@@ -1391,6 +1688,178 @@ mod tests {
     }
 
     #[test]
+    fn configure_does_not_wait_behind_a_running_turn() {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        let dir = TempDir::new().unwrap();
+        let pi_agent_dir = dir.path().join("pi-agent");
+        let hub_config_dir = dir.path().join("hub-cfg");
+        std::fs::create_dir_all(&pi_agent_dir).unwrap();
+        std::fs::create_dir_all(&hub_config_dir).unwrap();
+
+        let mut state = AppState::new(GlobalConfig::default());
+        state.pi_dirs = Some(sidecar::PiDirs {
+            agent_dir: pi_agent_dir,
+            hub_config_dir,
+        });
+        let state = &state;
+
+        std::thread::scope(|scope| {
+            let (locked_tx, locked_rx) = mpsc::channel::<()>();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let holder = scope.spawn(move || {
+                let _guard = state.pi_adapter.lock().unwrap();
+                let _ = locked_tx.send(());
+                let _ = release_rx.recv();
+            });
+            locked_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the fake turn never took the adapter lock");
+
+            let (result_tx, result_rx) = mpsc::channel();
+            let configuring = scope.spawn(move || {
+                let req = PiConfigureProviderRequest {
+                    provider: "opencode-go".to_string(),
+                    ..Default::default()
+                };
+                let _ = result_tx.send(cmd_pi_configure_provider(state, req));
+            });
+
+            let started = Instant::now();
+            let result = result_rx.recv_timeout(Duration::from_secs(1));
+            let waited = started.elapsed();
+            // Always release the fake turn, even when configure is still stuck behind it.
+            release_tx.send(()).unwrap();
+            holder.join().unwrap();
+            configuring.join().unwrap();
+
+            let status = result
+                .unwrap_or_else(|_| {
+                    panic!("configure waited {waited:?} behind the running turn's adapter lock")
+                })
+                .unwrap();
+            assert_eq!(status.active_provider.as_deref(), Some("opencode-go"));
+        });
+    }
+
+    #[test]
+    fn send_upgrades_offline_adapter_lazily() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let fake_pi = dir.path().join("pi");
+        std::fs::write(
+            &fake_pi,
+            concat!(
+                "#!/usr/bin/env bash\n",
+                "echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}'\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let config = GlobalConfig {
+            sidecar: types::SidecarConfig {
+                dpi_backend_bin: fake_pi.display().to_string(),
+                tchelvis_bin: "__nonexistent_tchelvis__".to_string(),
+            },
+            ..GlobalConfig::default()
+        };
+        let state = AppState::new(config);
+        // Set the root directly: `cmd_open_workspace` would also record this temp path in the
+        // user's real `~/.config/game-hub` recents, which this test does not need.
+        *state.workspace_root.lock().unwrap() = Some(ws);
+        *state.pi_adapter.lock().unwrap() = Box::new(sidecar::OfflinePiAdapter);
+        assert_eq!(state.pi_adapter.lock().unwrap().mode(), "offline");
+
+        cmd_pi_send_message(
+            &state,
+            AmbientEnvelope {
+                user_message: "hi".to_string(),
+                active_context: ActiveContext {
+                    focused_panel: "chat".to_string(),
+                    open_tabs: vec![],
+                    dirty_files: vec![],
+                    latest_loop: None,
+                },
+                one_shot_attachments: vec![],
+            },
+        )
+        .unwrap();
+
+        assert_ne!(state.pi_adapter.lock().unwrap().mode(), "offline");
+    }
+
+    #[test]
+    fn connect_command_uses_injected_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let pi_agent_dir = dir.path().join("pi-agent");
+        let hub_config_dir = dir.path().join("hub-cfg");
+        let agent_dir_log = dir.path().join("agent-dir.log");
+        std::fs::create_dir_all(&pi_agent_dir).unwrap();
+        std::fs::create_dir_all(&hub_config_dir).unwrap();
+
+        let fake_pi = dir.path().join("pi");
+        std::fs::write(
+            &fake_pi,
+            format!(
+                "#!/usr/bin/env bash\nprintf '%s' \"$PI_CODING_AGENT_DIR\" > '{}'\n\
+                 echo '{{\"status\":\"ready\",\"provider\":\"opencode-go\",\"authType\":\"api_key\"}}'\n",
+                agent_dir_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let config = GlobalConfig {
+            sidecar: types::SidecarConfig {
+                dpi_backend_bin: fake_pi.display().to_string(),
+                tchelvis_bin: "__nonexistent_tchelvis__".to_string(),
+            },
+            ..GlobalConfig::default()
+        };
+        let mut state = AppState::new(config);
+        state.pi_dirs = Some(sidecar::PiDirs {
+            agent_dir: pi_agent_dir.clone(),
+            hub_config_dir,
+        });
+
+        let result = cmd_pi_connect_provider(
+            &state,
+            PiConnectProviderRequest {
+                provider: "opencode-go".to_string(),
+                api_key: "sk-test-connect-key".to_string(),
+            },
+        )
+        .unwrap();
+
+        let auth: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(pi_agent_dir.join("auth.json")).unwrap())
+                .unwrap();
+        assert_eq!(auth["opencode-go"]["key"], "sk-test-connect-key");
+        assert_eq!(
+            std::fs::read_to_string(&agent_dir_log).unwrap(),
+            pi_agent_dir.display().to_string(),
+            "pi auth check must receive the injected agent dir"
+        );
+        assert_eq!(result.check.as_ref().unwrap().status, "ready");
+        assert_eq!(result.check_error, None);
+        assert!(result
+            .status
+            .configured_providers
+            .contains(&"opencode-go".to_string()));
+        assert!(!serde_json::to_string(&result)
+            .unwrap()
+            .contains("sk-test-connect-key"));
+    }
+
+    #[test]
     fn end_to_end_ipc_flow_without_desktop_feature() {
         let dir = TempDir::new().unwrap();
         let state = AppState::new(GlobalConfig::default());
@@ -1466,5 +1935,341 @@ mod tests {
         assert_eq!(runs[0].run_id, dispatched.run_id);
         assert!(cmd_stop_loop(&custom_state, dispatched.run_id).is_err());
         let _ = &mut custom_state;
+    }
+}
+
+#[cfg(test)]
+mod preview_command_tests {
+    use super::*;
+    use crate::preview::{LaunchSpec, PreviewLauncher};
+    use crate::types::{PreviewEngine, ProjectConfig};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    use tempfile::TempDir;
+
+    enum FakeWait {
+        Ok,
+        Err(String),
+        Blocked(mpsc::Receiver<Result<(), String>>),
+    }
+
+    #[derive(Default)]
+    struct FakeLauncherInner {
+        specs: Mutex<Vec<LaunchSpec>>,
+        wait: Mutex<Option<FakeWait>>,
+        command: Mutex<String>,
+        ready_marker: Mutex<Option<PathBuf>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeLauncher {
+        inner: Arc<FakeLauncherInner>,
+    }
+
+    impl FakeLauncher {
+        fn new(wait: FakeWait) -> Self {
+            let launcher = Self::default();
+            *launcher.inner.wait.lock().unwrap() = Some(wait);
+            launcher
+        }
+
+        fn with_command(self, command: &str) -> Self {
+            *self.inner.command.lock().unwrap() = command.to_string();
+            self
+        }
+
+        /// Makes `wait_ready` return only after the child created `marker`, so log assertions
+        /// do not race the process startup.
+        fn with_ready_marker(self, marker: &Path) -> Self {
+            *self.inner.ready_marker.lock().unwrap() = Some(marker.to_path_buf());
+            self
+        }
+
+        fn specs(&self) -> Vec<LaunchSpec> {
+            self.inner.specs.lock().unwrap().clone()
+        }
+    }
+
+    impl PreviewLauncher for FakeLauncher {
+        fn spawn(&self, spec: &LaunchSpec) -> Result<Child, String> {
+            self.inner.specs.lock().unwrap().push(spec.clone());
+            let command = {
+                let configured = self.inner.command.lock().unwrap().clone();
+                if configured.is_empty() {
+                    "sleep 30".to_string()
+                } else {
+                    configured
+                }
+            };
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c")
+                .arg(command)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            cmd.spawn().map_err(|e| format!("fake spawn failed: {e}"))
+        }
+
+        fn wait_ready(&self, _port: u16, _timeout: Duration) -> Result<(), String> {
+            let wait = self
+                .inner
+                .wait
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(FakeWait::Ok);
+            if let Some(marker) = self.inner.ready_marker.lock().unwrap().clone() {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !marker.exists() {
+                    assert!(Instant::now() < deadline, "fake child never signalled readiness");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            match wait {
+                FakeWait::Ok => Ok(()),
+                FakeWait::Err(err) => Err(err),
+                FakeWait::Blocked(rx) => {
+                    rx.recv().unwrap_or_else(|_| Err("cancelled".to_string()))
+                }
+            }
+        }
+    }
+
+    /// Builds an `AppState` pointing at a temp workspace whose `game/` matches `engine`.
+    fn preview_workspace(engine: &str) -> (TempDir, AppState) {
+        let dir = TempDir::new().unwrap();
+        let game = dir.path().join("ws/game");
+        std::fs::create_dir_all(&game).unwrap();
+        if engine == "godot" {
+            std::fs::write(game.join("project.godot"), "").unwrap();
+        } else {
+            std::fs::write(
+                game.join("package.json"),
+                r#"{"scripts":{"dev":"vite"}}"#,
+            )
+            .unwrap();
+        }
+
+        let state = AppState::new(GlobalConfig::default());
+        *state.workspace_root.lock().unwrap() = Some(dir.path().join("ws"));
+        *state.project_config.lock().unwrap() = Some(ProjectConfig {
+            schema_version: 1,
+            engine: engine.to_string(),
+            game_dir: "game".to_string(),
+            default_branch: "main".to_string(),
+        });
+        (dir, state)
+    }
+
+    fn attach_launcher(state: &mut AppState, launcher: &FakeLauncher) {
+        state.preview_launcher = Box::new(launcher.clone());
+    }
+
+    fn wait_for_spawn(launcher: &FakeLauncher) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while launcher.specs().is_empty() {
+            assert!(Instant::now() < deadline, "preview never spawned");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn preview_start_main_dispatches_on_resolved_engine() {
+        let (_dir, mut state) = preview_workspace("godot");
+        let launcher = FakeLauncher::new(FakeWait::Ok);
+        attach_launcher(&mut state, &launcher);
+
+        let status = cmd_preview_start(&state, "main".into(), None, None).unwrap();
+        let specs = launcher.specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].engine, PreviewEngine::Godot);
+        assert_eq!(
+            specs[0].project_dir,
+            state.active_root().unwrap().join("game")
+        );
+        assert_eq!(status.mode, "main");
+        assert!(status.running);
+
+        let (_dir, mut state) = preview_workspace("web");
+        let launcher = FakeLauncher::new(FakeWait::Ok);
+        attach_launcher(&mut state, &launcher);
+
+        let status = cmd_preview_start(&state, "main".into(), None, None).unwrap();
+        let specs = launcher.specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].engine, PreviewEngine::Web);
+        assert!(specs[0].args.iter().any(|a| a == "--strictPort"));
+        assert_eq!(status.mode, "main");
+        assert!(status.running);
+    }
+
+    #[test]
+    fn godot_start_passes_rect_args() {
+        let (_dir, mut state) = preview_workspace("godot");
+        let launcher = FakeLauncher::new(FakeWait::Ok);
+        attach_launcher(&mut state, &launcher);
+
+        let hub = HubWindowRect {
+            x: 100,
+            y: 50,
+            width: 1920,
+            height: 1080,
+        };
+        let status = cmd_preview_start(&state, "main".into(), None, Some(hub)).unwrap();
+
+        let specs = launcher.specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].engine, PreviewEngine::Godot);
+        assert!(
+            specs[0]
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--position", "420,230"]),
+            "args: {:?}",
+            specs[0].args
+        );
+        assert!(specs[0].args.iter().any(|arg| arg == "--always-on-top"));
+        assert_eq!(status.engine, Some(PreviewEngine::Godot));
+        assert!(status.running);
+    }
+
+    #[test]
+    fn second_start_same_tree_keeps_pid() {
+        let (_dir, mut state) = preview_workspace("godot");
+        let launcher = FakeLauncher::new(FakeWait::Ok);
+        attach_launcher(&mut state, &launcher);
+
+        let first = cmd_preview_start(&state, "main".into(), None, None).unwrap();
+        let second = cmd_preview_start(&state, "main".into(), None, None).unwrap();
+
+        assert_eq!(launcher.specs().len(), 1);
+        assert_eq!(first.pid, second.pid);
+        assert!(second.running);
+    }
+
+    #[test]
+    fn exited_preview_is_reaped_and_f5_starts_a_new_process() {
+        let (_dir, mut state) = preview_workspace("godot");
+        let launcher = FakeLauncher::new(FakeWait::Ok).with_command("echo bye; exit 0");
+        attach_launcher(&mut state, &launcher);
+
+        let _first = cmd_preview_start(&state, "main".into(), None, None).unwrap();
+
+        // The user closed the game window: the next status poll must notice and go idle.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let idle = loop {
+            let status = cmd_preview_status(&state).unwrap();
+            if status.mode == "idle" {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "exited preview was never reaped");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(!idle.running);
+        assert!(idle.logs.iter().any(|line| line == "bye"), "logs: {:?}", idle.logs);
+
+        // F5 (or a direct start) now spawns again instead of returning the stale status.
+        let _second = cmd_preview_start(&state, "main".into(), None, None).unwrap();
+        assert_eq!(launcher.specs().len(), 2);
+    }
+
+    #[test]
+    fn unknown_mode_is_rejected() {
+        let (_dir, mut state) = preview_workspace("web");
+        let launcher = FakeLauncher::new(FakeWait::Ok);
+        attach_launcher(&mut state, &launcher);
+
+        let err = cmd_preview_start(&state, "web".into(), None, None).unwrap_err();
+        assert_eq!(err, "unsupported preview mode: web");
+        assert!(launcher.specs().is_empty());
+    }
+
+    #[test]
+    fn start_returns_cancelled_when_stopped_during_healthcheck() {
+        let (_dir, mut state) = preview_workspace("web");
+        let (tx, rx) = mpsc::channel();
+        let launcher = FakeLauncher::new(FakeWait::Blocked(rx));
+        attach_launcher(&mut state, &launcher);
+
+        std::thread::scope(|scope| {
+            let start = scope.spawn(|| cmd_preview_start(&state, "main".into(), None, None));
+            wait_for_spawn(&launcher);
+
+            let stopped = Instant::now();
+            cmd_preview_stop(&state).unwrap();
+            assert!(
+                stopped.elapsed() < Duration::from_secs(1),
+                "preview_stop waited on the healthcheck"
+            );
+
+            tx.send(Ok(())).unwrap();
+            let err = start.join().unwrap().unwrap_err();
+            assert_eq!(err, "preview start cancelled");
+        });
+
+        let status = cmd_preview_status(&state).unwrap();
+        assert!(!status.running);
+        assert_eq!(status.mode, "idle");
+    }
+
+    #[test]
+    fn failed_healthcheck_keeps_logs() {
+        let (dir, mut state) = preview_workspace("web");
+        let marker = dir.path().join("preview-ready");
+        let command = format!("echo boot; touch '{}'; sleep 30", marker.display());
+        let launcher = FakeLauncher::new(FakeWait::Err("healthcheck timed out".into()))
+            .with_command(&command)
+            .with_ready_marker(&marker);
+        attach_launcher(&mut state, &launcher);
+
+        let err = cmd_preview_start(&state, "main".into(), None, None).unwrap_err();
+        assert!(err.contains("healthcheck timed out"), "err: {err}");
+
+        let status = cmd_preview_status(&state).unwrap();
+        assert!(!status.running);
+        assert_eq!(status.mode, "idle");
+        assert!(
+            status.logs.iter().any(|line| line == "boot"),
+            "logs: {:?}",
+            status.logs
+        );
+    }
+
+    #[test]
+    fn status_while_starting_has_pid_not_running() {
+        let (_dir, mut state) = preview_workspace("web");
+        let (tx, rx) = mpsc::channel();
+        let launcher = FakeLauncher::new(FakeWait::Blocked(rx));
+        attach_launcher(&mut state, &launcher);
+
+        std::thread::scope(|scope| {
+            let start = scope.spawn(|| cmd_preview_start(&state, "main".into(), None, None));
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let starting = loop {
+                let status = cmd_preview_status(&state).unwrap();
+                if status.pid.is_some() {
+                    break status;
+                }
+                assert!(Instant::now() < deadline, "preview never started");
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            assert!(!starting.running);
+            assert_eq!(starting.engine, Some(PreviewEngine::Web));
+
+            tx.send(Ok(())).unwrap();
+            let finished = start.join().unwrap().unwrap();
+            assert!(finished.running);
+        });
     }
 }

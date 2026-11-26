@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Global application configuration loaded from `~/.config/game-hub/config.toml`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -106,6 +107,8 @@ impl Default for GlobalConfig {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ProjectConfig {
     pub schema_version: u32,
+    /// `"godot"`, `"web"`, or missing/unknown (resolved from the project files).
+    #[serde(default)]
     pub engine: String,
     pub game_dir: String,
     pub default_branch: String,
@@ -323,15 +326,36 @@ pub struct DispatchLoopOptions {
     pub from_head: bool,
 }
 
-/// Status of the active game/web preview process.
+/// Engine that backs a preview process.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PreviewEngine {
+    Godot,
+    Web,
+}
+
+/// Status of the active game/web preview process (the single preview IPC contract).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PreviewStatus {
-    pub active: bool,
+    pub running: bool,
     pub mode: String,
-    pub port: Option<u16>,
+    pub engine: Option<PreviewEngine>,
     pub url: Option<String>,
     pub pid: Option<u32>,
+    pub worktree_path: Option<String>,
+    pub compositor_available: bool,
+    pub can_capture: bool,
     pub degraded_reason: Option<String>,
+    pub logs: Vec<String>,
+}
+
+/// Physical rectangle of the Hub window, used to place a Godot preview over it.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HubWindowRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Result of capturing a preview frame + log tail.
@@ -533,13 +557,25 @@ pub struct PiModelCatalog {
 }
 
 /// Request payload for `pi_configure_provider`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct PiConfigureProviderRequest {
     pub provider: String,
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub mark_completed: bool,
+}
+
+/// Manual `Debug` so a raw API key can never reach logs or error strings.
+impl fmt::Debug for PiConfigureProviderRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PiConfigureProviderRequest")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("mark_completed", &self.mark_completed)
+            .finish()
+    }
 }
 
 /// Result returned by `pi_check_provider` (`pi auth check --provider <p> --no-refresh --json`).
@@ -549,4 +585,31 @@ pub struct PiAuthCheckResult {
     pub provider: String,
     pub auth_type: Option<String>,
     pub reason: Option<String>,
+}
+
+/// Request payload for `pi_connect_provider`: store an API key, then `pi auth check`.
+#[derive(Deserialize, Clone)]
+pub struct PiConnectProviderRequest {
+    pub provider: String,
+    pub api_key: String,
+}
+
+/// Manual `Debug` so a raw API key can never reach logs or error strings.
+impl fmt::Debug for PiConnectProviderRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PiConnectProviderRequest")
+            .field("provider", &self.provider)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Result returned by `pi_connect_provider`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PiConnectResult {
+    pub status: PiSetupStatus,
+    /// `None` when pi is missing or the check could not be parsed.
+    pub check: Option<PiAuthCheckResult>,
+    /// Sanitized reason the check did not run; never contains the key.
+    pub check_error: Option<String>,
 }

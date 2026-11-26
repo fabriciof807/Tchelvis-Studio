@@ -23,6 +23,20 @@ import {
   getMimeTypeForExt,
   type MediaKind,
 } from './mediaUtils';
+import {
+  BUTTON_STEP,
+  fitTransform,
+  formatZoomLabel,
+  isPixelated,
+  oneToOne,
+  panBy,
+  wheelFactor,
+  zoomAt,
+  type Point,
+  type Size,
+  type ViewState,
+  type ViewportBounds,
+} from './imageViewport';
 
 export interface MediaViewerPanelParams {
   relPath: string;
@@ -127,22 +141,142 @@ async function parseModel3D(ext: string, bytes: Uint8Array): Promise<THREE.Objec
   throw new Error(`Unsupported 3D format: .${ext}`);
 }
 
-const ImageViewer: React.FC<{ relPath: string }> = ({ relPath }) => {
+const measureStage = (el: HTMLElement | null): Size => ({
+  w: el?.clientWidth ?? 0,
+  h: el?.clientHeight ?? 0,
+});
+
+/** Exported for tests only; panels use `MediaViewerPanel`. */
+export const ImageViewer: React.FC<{ relPath: string }> = ({ relPath }) => {
   const { t } = useI18n();
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [zoom, setZoom] = useState<number | 'fit'>('fit');
+  const [view, setView] = useState<ViewState | null>(null);
+  const [imageSize, setImageSize] = useState<Size | null>(null);
   const [checkerboard, setCheckerboard] = useState(true);
-  const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
+  const [panning, setPanning] = useState(false);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const imageSizeRef = useRef<Size | null>(null);
+  const dragRef = useRef<Point | null>(null);
+
+  const currentBounds = (): ViewportBounds | null => {
+    const image = imageSizeRef.current;
+    if (!image) return null;
+    return { stage: measureStage(stageRef.current), image };
+  };
+
+  const zoomBy = (factor: number) => {
+    const bounds = currentBounds();
+    if (!bounds) return;
+    const anchor = { x: bounds.stage.w / 2, y: bounds.stage.h / 2 };
+    setView((prev) => (prev ? zoomAt(prev, factor, anchor, bounds) : prev));
+  };
+
+  const applyFit = () => {
+    const bounds = currentBounds();
+    setView(bounds ? fitTransform(bounds) : { scale: 1, x: 0, y: 0, mode: 'fit' });
+  };
+
+  const applyOneToOne = () => {
+    const bounds = currentBounds();
+    if (!bounds) return;
+    setView((prev) => (prev ? oneToOne(prev, bounds) : prev));
+  };
+
+  const handleLoad = (event: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = event.currentTarget;
+    const size = { w: img.naturalWidth, h: img.naturalHeight };
+    imageSizeRef.current = size;
+    setImageSize(size);
+    setView(fitTransform({ stage: measureStage(stageRef.current), image: size }));
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 1) return;
+    event.preventDefault();
+    const el = stageRef.current;
+    try {
+      el?.setPointerCapture?.(event.pointerId);
+    } catch {
+      // older engines / jsdom without pointer capture
+    }
+    dragRef.current = { x: event.clientX, y: event.clientY };
+    setPanning(true);
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const last = dragRef.current;
+    if (!last) return;
+    const dx = event.clientX - last.x;
+    const dy = event.clientY - last.y;
+    dragRef.current = { x: event.clientX, y: event.clientY };
+    if (dx === 0 && dy === 0) return;
+    const bounds = currentBounds();
+    if (!bounds) return;
+    setView((prev) => (prev ? panBy(prev, dx, dy, bounds) : prev));
+  };
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    setPanning(false);
+    const el = stageRef.current;
+    try {
+      el?.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // older engines / jsdom without pointer capture
+    }
+  };
+
+  const preventMiddleButtonDefault = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.button === 1) event.preventDefault();
+  };
+
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const refit = () => {
+      const image = imageSizeRef.current;
+      if (!image) return;
+      const stage = measureStage(el);
+      setView((prev) => (prev && prev.mode === 'fit' ? fitTransform({ stage, image }) : prev));
+    };
+    refit();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(refit);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const bounds = currentBounds();
+      if (!bounds) return;
+      const rect = el.getBoundingClientRect();
+      const anchor = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+      const factor = wheelFactor(event.deltaY, event.deltaMode);
+      setView((prev) => (prev ? zoomAt(prev, factor, anchor, bounds) : prev));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+    // Current view/bounds are read through refs, so the listener never goes stale.
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     let createdUrl: string | null = null;
     setLoading(true);
     setError(null);
-    setNaturalSize(null);
-    setZoom('fit');
+    setBlobUrl(null);
+    setView(null);
+    setImageSize(null);
+    setPanning(false);
+    imageSizeRef.current = null;
+    dragRef.current = null;
 
     void ipc
       .readBinaryFile(relPath)
@@ -171,14 +305,7 @@ const ImageViewer: React.FC<{ relPath: string }> = ({ relPath }) => {
     };
   }, [relPath]);
 
-  const zoomPercent = zoom === 'fit' ? 100 : Math.round(zoom * 100);
-
-  const stepZoom = (delta: number) => {
-    setZoom((prev) => {
-      const base = prev === 'fit' ? 1 : prev;
-      return Math.max(0.1, Math.min(8, Number((base + delta).toFixed(2))));
-    });
-  };
+  const zoomLabel = view ? formatZoomLabel(view, t('media.fit')) : t('media.fit');
 
   return (
     <div className="panel-shell">
@@ -191,9 +318,9 @@ const ImageViewer: React.FC<{ relPath: string }> = ({ relPath }) => {
           <span className="file-badge" title={relPath}>
             {relPath}
           </span>
-          {naturalSize && (
+          {imageSize && (
             <span className="muted-text">
-              {naturalSize.w} × {naturalSize.h}px
+              {imageSize.w} × {imageSize.h}px
             </span>
           )}
         </div>
@@ -201,25 +328,25 @@ const ImageViewer: React.FC<{ relPath: string }> = ({ relPath }) => {
           <button
             type="button"
             className="btn-ghost-sm inline-icon-btn"
-            onClick={() => stepZoom(-0.25)}
+            onClick={() => zoomBy(1 / BUTTON_STEP)}
             title={t('media.zoomOut')}
           >
             <ZoomOutIcon size={13} />
           </button>
-          <span className="file-badge">{zoom === 'fit' ? t('media.fit') : `${zoomPercent}%`}</span>
+          <span className="file-badge image-zoom-label">{zoomLabel}</span>
           <button
             type="button"
             className="btn-ghost-sm inline-icon-btn"
-            onClick={() => stepZoom(0.25)}
+            onClick={() => zoomBy(BUTTON_STEP)}
             title={t('media.zoomIn')}
           >
             <ZoomInIcon size={13} />
           </button>
-          <button type="button" className="btn-ghost-sm" onClick={() => setZoom('fit')}>
+          <button type="button" className="btn-ghost-sm" onClick={applyFit}>
             {t('media.fit')}
           </button>
-          <button type="button" className="btn-ghost-sm" onClick={() => setZoom(1)}>
-            100%
+          <button type="button" className="btn-ghost-sm" onClick={applyOneToOne}>
+            1:1
           </button>
           <button
             type="button"
@@ -234,23 +361,32 @@ const ImageViewer: React.FC<{ relPath: string }> = ({ relPath }) => {
       {error && <div className="banner-error">{error}</div>}
 
       <div
-        className={`media-image-stage ${checkerboard ? 'media-checkerboard' : ''}`}
-        onWheel={(e) => {
-          e.preventDefault();
-          stepZoom(e.deltaY < 0 ? 0.15 : -0.15);
-        }}
+        ref={stageRef}
+        className={`media-image-stage ${checkerboard ? 'media-checkerboard' : ''}${
+          panning ? ' is-panning' : ''
+        }`}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onMouseDown={preventMiddleButtonDefault}
+        onAuxClick={preventMiddleButtonDefault}
       >
         {loading && <div className="panel-empty">{t('media.loading')}</div>}
         {!loading && blobUrl && (
           <img
             src={blobUrl}
             alt={relPath}
-            className={zoom === 'fit' ? 'media-image-fit' : 'media-image-scaled'}
-            style={zoom === 'fit' ? undefined : { transform: `scale(${zoom})` }}
-            onLoad={(e) => {
-              const img = e.currentTarget;
-              setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
-            }}
+            draggable={false}
+            className={`media-image-scaled${
+              view && isPixelated(view.scale) ? ' media-image-pixelated' : ''
+            }`}
+            style={
+              view
+                ? { transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }
+                : undefined
+            }
+            onLoad={handleLoad}
           />
         )}
       </div>

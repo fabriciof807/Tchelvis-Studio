@@ -9,7 +9,6 @@ import {
   ImageIcon,
   PaperclipIcon,
 } from '../components/Icons';
-import { PiSetupWizard } from '../components/PiSetupWizard';
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -34,13 +33,16 @@ export const ChatPanel: React.FC = memo(() => {
   const isSendingChat = useWorkspaceStore((s) => s.isSendingChat);
   const capturesQuotaExceeded = useWorkspaceStore((s) => s.capturesQuotaExceeded);
   const piSetupStatus = useWorkspaceStore((s) => s.piSetupStatus);
-  const piSetupOpen = useWorkspaceStore((s) => s.piSetupOpen);
+  const providerDialog = useWorkspaceStore((s) => s.providerDialog);
+  const providerSignIn = useWorkspaceStore((s) => s.providerSignIn);
 
   const sendChatMessage = useWorkspaceStore((s) => s.sendChatMessage);
   const addOneShotAttachment = useWorkspaceStore((s) => s.addOneShotAttachment);
   const removeOneShotAttachment = useWorkspaceStore((s) => s.removeOneShotAttachment);
   const setCaptureQuotaStatus = useWorkspaceStore((s) => s.setCaptureQuotaStatus);
-  const setPiSetupOpen = useWorkspaceStore((s) => s.setPiSetupOpen);
+  const openProviderDialog = useWorkspaceStore((s) => s.openProviderDialog);
+  const revealProviderDialog = useWorkspaceStore((s) => s.revealProviderDialog);
+  const skipPiSetup = useWorkspaceStore((s) => s.skipPiSetup);
 
   const [draft, setDraft] = useState('');
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
@@ -91,6 +93,11 @@ export const ChatPanel: React.FC = memo(() => {
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault();
     if ((!draft.trim() && oneShotAttachments.length === 0) || isSendingChat) return;
+    // §4.6: sending while not connected opens the dialog without losing the draft.
+    if (piSetupStatus?.needs_setup) {
+      openProviderDialog();
+      return;
+    }
     const text = draft;
     setDraft('');
     void sendChatMessage(text);
@@ -109,13 +116,24 @@ export const ChatPanel: React.FC = memo(() => {
 
   const subagentEntries = Object.entries(subagentStatuses);
   const providerReady = piSetupStatus?.provider_ready === true;
-  const pillLabel = providerReady
-    ? `${piSetupStatus?.active_provider ?? 'pi'}${
-        piSetupStatus?.active_model ? ` · ${piSetupStatus.active_model}` : ''
-      }`
-    : piSetupStatus?.first_run_completed
-      ? t('piSetup.pillOffline')
-      : t('piSetup.pillConnect');
+  const waitingHidden =
+    providerDialog.hiddenForSignIn && providerSignIn?.phase === 'waiting';
+  const pillLabel = waitingHidden
+    ? t('piSetup.pillWaiting')
+    : providerReady
+      ? `${piSetupStatus?.active_provider ?? 'pi'}${
+          piSetupStatus?.active_model ? ` · ${piSetupStatus.active_model}` : ''
+        }`
+      : piSetupStatus?.first_run_completed
+        ? t('piSetup.pillOffline')
+        : t('piSetup.pillConnect');
+
+  const handlePillClick = () => {
+    // §4.4: a dialog hidden for sign-in comes back on the sign-in provider, including the
+    // timeout/error states where the pill already shows its normal label again.
+    if (providerDialog.hiddenForSignIn) revealProviderDialog();
+    else openProviderDialog();
+  };
 
   return (
     <div className="chat-panel">
@@ -125,11 +143,13 @@ export const ChatPanel: React.FC = memo(() => {
           <span className="chat-subtitle">{t('chat.subtitle')}</span>
           <button
             type="button"
-            className={`pi-provider-pill ${providerReady ? 'ready' : 'warning'}`}
-            onClick={() => setPiSetupOpen(!piSetupOpen)}
+            className={`pi-provider-pill ${waitingHidden ? 'waiting' : providerReady ? 'ready' : 'warning'}`}
+            onClick={handlePillClick}
             title={t('piSetup.settingsConfigureBtn')}
           >
-            <span className={`pi-status-dot ${providerReady ? 'ready' : 'warning'}`} />
+            <span
+              className={`pi-status-dot ${waitingHidden ? 'waiting' : providerReady ? 'ready' : 'warning'}`}
+            />
             <span className="pi-pill-text">{pillLabel}</span>
           </button>
         </div>
@@ -139,8 +159,6 @@ export const ChatPanel: React.FC = memo(() => {
           </div>
         )}
       </div>
-
-      {piSetupOpen && <PiSetupWizard />}
 
       {subagentEntries.length > 0 && (
         <div className="subagent-bar">
@@ -161,8 +179,28 @@ export const ChatPanel: React.FC = memo(() => {
       {uploadError && <div className="banner-error">{uploadError}</div>}
 
       <div className="chat-messages">
-        {chatMessages.length === 0 && (
-          <div className="chat-empty">{t('chat.empty')}</div>
+        {piSetupStatus?.needs_setup ? (
+          <div className="chat-connect-cta">
+            <p className="chat-connect-cta-title">{t('chat.connectCta.title')}</p>
+            <button
+              type="button"
+              className="btn-primary-sm"
+              onClick={() => openProviderDialog()}
+            >
+              {t('chat.connectCta.button')}
+            </button>
+            {!piSetupStatus.first_run_completed && (
+              <button
+                type="button"
+                className="btn-ghost-sm"
+                onClick={() => void skipPiSetup()}
+              >
+                {t('providerDialog.useOffline')}
+              </button>
+            )}
+          </div>
+        ) : (
+          chatMessages.length === 0 && <div className="chat-empty">{t('chat.empty')}</div>
         )}
         {chatMessages.map((msg) => (
           <div key={msg.id} className={`chat-msg role-${msg.role}`}>

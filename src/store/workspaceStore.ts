@@ -14,15 +14,30 @@ import {
   type LoopRunState,
   type OneShotAttachment,
   type PiConfigureProviderRequest,
+  type PiConnectResult,
   type PiEventPayload,
   type PiModelCatalog,
   type PiSetupStatus,
   type PiToolCall,
+  type PreviewCaptureResult,
   type PreviewStatus,
   type RecentWorkspace,
   type UpdateChannel,
   type WorkspaceInfo,
 } from '../types/ipc';
+import {
+  buildProviderRows,
+  connectedProviderIds,
+  isValidSlug,
+  pickFallbackDefault,
+  pickInitialDefault,
+  type SignInPhase,
+} from '../components/providerDialog/providerDialogLogic';
+import {
+  createSignInPoller,
+  type SignInPollState,
+  type SignInPoller,
+} from '../components/providerDialog/signInPoller';
 
 export interface ChatMessage {
   id: string;
@@ -42,6 +57,19 @@ export interface PanelOpenRequest {
 }
 
 export type LeftSection = 'explorer' | 'loops' | 'lenses';
+
+/** A default change worth reporting; `model` is null when pi will use its own default. */
+export interface DefaultChange {
+  provider: string;
+  model: string | null;
+}
+
+/** `starting` means the backend is spawning/healthchecking; the game isn't running yet. */
+export type PreviewPhase = 'idle' | 'starting' | 'running' | 'error';
+
+/** Explicit result of a preview action: the caller must not infer it from the phase. */
+export type PreviewStartOutcome = 'ok' | 'cancelled' | { error: string };
+export type PreviewCaptureOutcome = 'ok' | 'cancelled' | { error: string };
 
 interface WorkspaceState {
   // Workspace & Files
@@ -70,13 +98,25 @@ interface WorkspaceState {
   lenses: LensInfo[];
   previewStatus: PreviewStatus | null;
   previewLightboxOpen: boolean;
+  previewPhase: PreviewPhase;
+  previewError: string | null;
+  /** Last start request, reused by Retry so a staging failure retries the same tree. */
+  lastPreviewRequest: { mode: 'main' | 'staging'; worktreePath: string | null } | null;
 
   piSetupStatus: PiSetupStatus | null;
   /** Last known pi model catalog; kept while a refetch runs (stale-while-revalidate). */
   modelCatalog: PiModelCatalog | null;
   modelCatalogLoading: boolean;
   modelCatalogError: string | null;
-  piSetupOpen: boolean;
+  providerDialog: { open: boolean; preselect: string | null; hiddenForSignIn: boolean };
+  providerSignIn: {
+    provider: string;
+    phase: SignInPhase;
+    startedAt: number;
+    detail: string | null;
+    /** True for a re-sign-in: no auto-poll, and restarts keep that mode. */
+    manualOnly?: boolean;
+  } | null;
   pendingTerminalCommand: string | null;
 
   // UI Language, Theme & Update Channel
@@ -134,16 +174,49 @@ interface WorkspaceState {
   sendChatMessage: (userMessage: string) => Promise<void>;
   handlePiEvent: (event: PiEventPayload) => void;
 
-  startPreview: (mode: 'main' | 'staging', worktreePath?: string) => Promise<void>;
+  startPreview: (
+    mode: 'main' | 'staging',
+    worktreePath?: string
+  ) => Promise<PreviewStartOutcome>;
+  retryPreview: () => void;
+  cancelPreviewStart: () => Promise<void>;
+  refreshPreviewStatus: () => Promise<void>;
+  focusPreview: () => Promise<void>;
+  handlePreviewHotkey: () => void;
   stopPreview: () => Promise<void>;
-  capturePreviewFrame: () => Promise<void>;
+  capturePreviewFrame: () => Promise<PreviewCaptureOutcome>;
   setPreviewLightboxOpen: (open: boolean) => void;
 
   refreshPiSetupStatus: () => Promise<PiSetupStatus | null>;
-  setPiSetupOpen: (open: boolean) => void;
+  openProviderDialog: (provider?: string) => void;
+  closeProviderDialog: () => void;
+  connectPiProvider: (
+    provider: string,
+    apiKey: string
+  ) => Promise<{ result: PiConnectResult; defaultChangedTo: DefaultChange | null }>;
+  /**
+   * `refetchCatalogOnReady` is set by "Sign in again": the model set can depend on the plan.
+   * `manualOnly` disables the auto-poll and timeout: the user confirms the new login manually.
+   */
+  startProviderSignIn: (
+    provider: string,
+    options?: { refetchCatalogOnReady?: boolean; manualOnly?: boolean }
+  ) => void;
+  checkProviderSignInNow: () => void;
+  cancelProviderSignIn: () => void;
+  revealProviderDialog: () => void;
+  /** Hides the modal so the terminal is usable, without typing anything into it. */
+  hideProviderDialogForSignIn: () => void;
+  disconnectPiProvider: (
+    provider: string
+  ) => Promise<{ defaultChangedTo: DefaultChange | null; stillViaEnv: boolean }>;
+  saveDefaultModel: (
+    selection: { provider: string; id: string } | null,
+    markCompleted: boolean
+  ) => Promise<void>;
   configurePiProvider: (req: PiConfigureProviderRequest) => Promise<PiSetupStatus>;
   logoutPiProvider: (provider: string) => Promise<PiSetupStatus>;
-  loadModelCatalog: () => Promise<void>;
+  loadModelCatalog: () => Promise<PiModelCatalog | null>;
   skipPiSetup: () => Promise<PiSetupStatus>;
   launchPiInteractiveLogin: (provider: string) => void;
   consumePendingTerminalCommand: () => string | null;
@@ -208,7 +281,180 @@ function sameMembers(a: string[], b: string[]): boolean {
 /** Only the newest catalog request may write its result, so a slow older one can't overwrite it. */
 let modelCatalogRequest = 0;
 
-export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
+/** Bumped by cancel/stop so a late start result can't resurrect a cancelled preview. */
+let previewStartGeneration = 0;
+
+/** One sign-in poll at a time; the session token invalidates results from a stopped poll. */
+let signInPoller: SignInPoller | null = null;
+let signInSession = 0;
+/** Set by "Sign in again": the provider set is unchanged, but the plan can change the models. */
+let signInRefetchCatalogOnReady = false;
+/** "Sign in again" on an already-connected provider: no auto-poll, no timeout. */
+let signInManualOnly = false;
+
+const CLOSED_PROVIDER_DIALOG = { open: false, preselect: null, hiddenForSignIn: false } as const;
+
+export const useWorkspaceStore = create<WorkspaceState>((set, get) => {
+  function stopSignInPoll(): void {
+    signInSession += 1;
+    signInRefetchCatalogOnReady = false;
+    signInManualOnly = false;
+    if (signInPoller) {
+      signInPoller.stop();
+      signInPoller = null;
+    }
+  }
+
+  /**
+   * §4.3 step 5: the first successful Connect (or sign-in) writes a default only when there is no
+   * usable one, so chat works even if the user closes the dialog right away.
+   */
+  async function applyInitialDefaultIfNeeded(provider: string): Promise<DefaultChange | null> {
+    const status = get().piSetupStatus;
+    if (!status) return null;
+    const connected = connectedProviderIds(status);
+    const usableDefault =
+      status.provider_ready &&
+      status.first_run_completed &&
+      status.active_provider !== null &&
+      connected.includes(status.active_provider);
+    if (usableDefault) return null;
+
+    const row = buildProviderRows(status).find((candidate) => candidate.id === provider);
+    const model = pickInitialDefault(get().modelCatalog, provider, row?.suggestedModels ?? []);
+    await get().configurePiProvider({ provider, model, mark_completed: true });
+    // The provider still changed even when the initial model is null (a custom slug with no
+    // curated suggestion), so the note must keep both halves.
+    return { provider, model };
+  }
+
+  async function finishSignInReady(provider: string, session: number): Promise<void> {
+    const refetchCatalog = signInRefetchCatalogOnReady;
+    signInRefetchCatalogOnReady = false;
+    signInManualOnly = false;
+    set({
+      providerSignIn: null,
+      providerDialog: { open: true, preselect: provider, hiddenForSignIn: false },
+    });
+    await get().refreshPiSetupStatus();
+    if (session !== signInSession) return;
+    // §4.7: on a re-sign-in the members of `configured_providers` don't change, so
+    // `refreshPiSetupStatus` won't refetch; the catalog must be reloaded once the login is ready.
+    if (refetchCatalog) void get().loadModelCatalog();
+    await applyInitialDefaultIfNeeded(provider);
+  }
+
+  function handleSignInPollState(
+    provider: string,
+    state: SignInPollState,
+    session: number
+  ): void {
+    if (session !== signInSession) return;
+    signInPoller = null;
+    if (state.kind === 'ready') {
+      void finishSignInReady(provider, session);
+      return;
+    }
+    if (state.kind === 'waiting') return;
+    const startedAt = get().providerSignIn?.startedAt ?? Date.now();
+    set({
+      providerSignIn: {
+        provider,
+        phase: state.kind,
+        startedAt,
+        detail:
+          state.kind === 'invalid'
+            ? state.reason
+            : state.kind === 'error'
+              ? state.detail
+              : null,
+        manualOnly: false,
+      },
+    });
+  }
+
+  function beginSignInPoll(provider: string, refetchCatalogOnReady = false): void {
+    stopSignInPoll();
+    signInRefetchCatalogOnReady = refetchCatalogOnReady;
+    signInManualOnly = false;
+    const session = signInSession;
+    set({
+      providerSignIn: { provider, phase: 'waiting', startedAt: Date.now(), detail: null, manualOnly: false },
+    });
+    const poller = createSignInPoller<ReturnType<typeof setTimeout>>({
+      provider,
+      check: (target) => ipc.piCheckProvider(target),
+      schedule: (fn, ms) => setTimeout(fn, ms),
+      cancel: (handle) => clearTimeout(handle),
+      now: () => Date.now(),
+      onState: (state) => handleSignInPollState(provider, state, session),
+    });
+    signInPoller = poller;
+    poller.start();
+  }
+
+  function beginManualSignIn(provider: string, refetchCatalogOnReady = false): void {
+    stopSignInPoll();
+    signInRefetchCatalogOnReady = refetchCatalogOnReady;
+    signInManualOnly = true;
+    set({
+      providerSignIn: { provider, phase: 'waiting', startedAt: Date.now(), detail: null, manualOnly: true },
+    });
+  }
+
+  /** S-TIMEOUT / S-ERROR "Check again": one check now, then a fresh poll if it isn't ready yet. */
+  async function runSingleSignInCheck(provider: string): Promise<void> {
+    const session = signInSession;
+    const refetchCatalogOnReady = signInRefetchCatalogOnReady;
+    const manualOnly = signInManualOnly;
+    try {
+      const check = await ipc.piCheckProvider(provider);
+      if (session !== signInSession) return;
+      if (check.status === 'ready') {
+        await finishSignInReady(provider, session);
+        return;
+      }
+      if (check.status === 'invalid') {
+        set({
+          providerSignIn: {
+            provider,
+            phase: 'invalid',
+            startedAt: get().providerSignIn?.startedAt ?? Date.now(),
+            detail: check.reason ?? null,
+            manualOnly,
+          },
+        });
+        return;
+      }
+    } catch (err) {
+      if (session !== signInSession) return;
+      if (manualOnly) {
+        set({
+          providerSignIn: {
+            provider,
+            phase: 'error',
+            startedAt: get().providerSignIn?.startedAt ?? Date.now(),
+            detail: err instanceof Error ? err.message : String(err),
+            manualOnly: true,
+          },
+        });
+        return;
+      }
+    }
+    if (session !== signInSession) return;
+    if (manualOnly) {
+      // "Sign in again" never auto-polls or times out: stay in S-WAITING until the user asks
+      // for another manual check.
+      const current = get().providerSignIn;
+      if (current && current.phase !== 'waiting') {
+        set({ providerSignIn: { ...current, phase: 'waiting', detail: null } });
+      }
+      return;
+    }
+    beginSignInPoll(provider, refetchCatalogOnReady);
+  }
+
+  return {
   workspace: null,
   recentWorkspaces: [],
   fileTree: [],
@@ -231,9 +477,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   lenses: [],
   previewStatus: null,
   previewLightboxOpen: false,
+  previewPhase: 'idle',
+  previewError: null,
+  lastPreviewRequest: null,
 
   piSetupStatus: null,
-  piSetupOpen: false,
+  providerDialog: { ...CLOSED_PROVIDER_DIALOG },
+  providerSignIn: null,
   pendingTerminalCommand: null,
   modelCatalog: null,
   modelCatalogLoading: false,
@@ -281,6 +531,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   openWorkspace: async (path: string) => {
+    // A workspace switch resets the chat underneath, so the dialog and any sign-in poll go away.
+    stopSignInPoll();
+    set({ providerDialog: { ...CLOSED_PROVIDER_DIALOG }, providerSignIn: null });
     const info = await ipc.openWorkspace(path);
     set({
       workspace: info,
@@ -292,6 +545,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       compactionNotice: null,
       previewStatus: null,
       previewLightboxOpen: false,
+      previewPhase: 'idle',
+      previewError: null,
+      lastPreviewRequest: null,
     });
 
     const [tree, lenses, runs, piSetup] = await Promise.all([
@@ -327,12 +583,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       loopRuns: runs,
       chatMessages: systemNotes,
       piSetupStatus: piSetup,
-      piSetupOpen: piSetup?.needs_setup === true,
     });
   },
 
   closeWorkspace: () => {
+    stopSignInPoll();
     set({
+      providerDialog: { ...CLOSED_PROVIDER_DIALOG },
+      providerSignIn: null,
       workspace: null,
       fileTree: [],
       openTabs: [],
@@ -343,6 +601,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       loopRuns: [],
       previewStatus: null,
       previewLightboxOpen: false,
+      previewPhase: 'idle',
+      previewError: null,
+      lastPreviewRequest: null,
     });
   },
 
@@ -425,8 +686,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return {
         rightCollapsed,
         zenMode: computeZenMode(state.leftCollapsed, rightCollapsed, state.bottomCollapsed),
-        piSetupOpen:
-          !rightCollapsed && state.piSetupStatus?.needs_setup ? true : state.piSetupOpen,
       };
     }),
 
@@ -658,20 +917,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
 
     if (get().piSetupStatus?.needs_setup) {
-      const hint = translate(get().locale, 'piSetup.chatBlockedHint');
-      set((s) => ({
-        isSendingChat: false,
-        piSetupOpen: true,
-        chatMessages: [
-          ...s.chatMessages,
-          {
-            id: `sys-pi-setup-${Date.now()}`,
-            role: 'system',
-            text: hint,
-            timestamp: new Date().toISOString(),
-          },
-        ],
-      }));
+      // Defensive guard for callers other than ChatPanel: no system message, just open the dialog.
+      set({ isSendingChat: false });
+      get().openProviderDialog();
       return;
     }
 
@@ -792,25 +1040,171 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   startPreview: async (mode, worktreePath) => {
-    const status = await ipc.previewStart(mode, worktreePath);
+    const generation = ++previewStartGeneration;
+    // The overlay opens straight away so the starting state (spinner, logs, Cancel) is visible.
+    set({
+      lastPreviewRequest: { mode, worktreePath: worktreePath ?? null },
+      previewPhase: 'starting',
+      previewError: null,
+      previewLightboxOpen: true,
+    });
+    try {
+      const status = await ipc.previewStart(mode, worktreePath);
+      if (generation !== previewStartGeneration) return 'cancelled';
+      set({
+        previewStatus: status,
+        previewPhase: status.running ? 'running' : 'starting',
+        previewLightboxOpen: true,
+      });
+      return 'ok';
+    } catch (err) {
+      if (generation !== previewStartGeneration) return 'cancelled';
+      // The backend keeps the failed start's log tail, so fetch it for the error state.
+      let status: PreviewStatus | null = null;
+      try {
+        status = await ipc.previewStatus();
+      } catch {
+        status = null;
+      }
+      if (generation !== previewStartGeneration) return 'cancelled';
+      set({
+        previewStatus: status,
+        previewPhase: 'error',
+        previewError: err instanceof Error ? err.message : String(err),
+        previewLightboxOpen: true,
+      });
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  },
+
+  /** Reuses the last request, so Retry after a staging failure starts staging again. */
+  retryPreview: () => {
+    const request = get().lastPreviewRequest;
+    void get().startPreview(
+      request?.mode ?? 'main',
+      request?.worktreePath ?? undefined
+    );
+  },
+
+  cancelPreviewStart: async () => {
+    // Invalidate the in-flight start before stopping, so its result can't reopen anything.
+    previewStartGeneration += 1;
+    set({
+      previewStatus: null,
+      previewPhase: 'idle',
+      previewError: null,
+      previewLightboxOpen: false,
+    });
+    try {
+      await ipc.previewStop();
+    } catch {
+      // Cancelling a start that never spawned is fine.
+    }
+  },
+
+  refreshPreviewStatus: async () => {
+    if (get().previewPhase !== 'starting') return;
+    const generation = previewStartGeneration;
+    let status: PreviewStatus;
+    try {
+      status = await ipc.previewStatus();
+    } catch {
+      return;
+    }
+    if (generation !== previewStartGeneration) return;
     set({
       previewStatus: status,
-      previewLightboxOpen: status.engine === 'web' && status.running,
+      previewPhase: status.running ? 'running' : 'starting',
     });
   },
 
+  focusPreview: async () => {
+    try {
+      await ipc.previewFocus();
+      set({ previewError: null });
+    } catch {
+      // Without Hyprland the compositor can't focus the window; the bar shows a note.
+      set({ previewError: translate(get().locale, 'preview.focusUnsupported') });
+    }
+  },
+
+  handlePreviewHotkey: () => {
+    const state = get();
+    // A second F5 while starting must not spawn again; it only brings the starting overlay back.
+    if (state.previewPhase === 'starting') {
+      set({ previewLightboxOpen: true });
+      return;
+    }
+    if (state.previewPhase === 'running' || state.previewStatus?.running) {
+      set({ previewLightboxOpen: true });
+      // Confirm the backend still owns a process: closing the game window must let F5 restart.
+      const generation = previewStartGeneration;
+      void (async () => {
+        let status: PreviewStatus;
+        try {
+          status = await ipc.previewStatus();
+        } catch {
+          // An IPC failure means "unknown", not "exited": never start a second process on top
+          // of a preview that may still be alive. Keep the focus/reopen behaviour instead.
+          if (generation !== previewStartGeneration) return;
+          if (get().previewStatus?.engine === 'godot') void get().focusPreview();
+          return;
+        }
+        if (generation !== previewStartGeneration) return;
+        if (status.running) {
+          set({ previewStatus: status, previewPhase: 'running' });
+          if (status.engine === 'godot') void get().focusPreview();
+          return;
+        }
+        // The process exited while the store still said running: restart the same tree.
+        const request = get().lastPreviewRequest;
+        set({ previewStatus: status, previewPhase: 'idle', previewError: null });
+        void get().startPreview(request?.mode ?? 'main', request?.worktreePath ?? undefined);
+      })();
+      return;
+    }
+    void state.startPreview('main');
+  },
+
   stopPreview: async () => {
-    await ipc.previewStop();
-    set({ previewStatus: null, previewLightboxOpen: false });
+    previewStartGeneration += 1;
+    try {
+      await ipc.previewStop();
+    } catch {
+      // The process may already be gone; the UI still has to leave the running state.
+    }
+    set({
+      previewStatus: null,
+      previewPhase: 'idle',
+      previewError: null,
+      previewLightboxOpen: false,
+    });
   },
 
   capturePreviewFrame: async () => {
-    const res = await ipc.previewCapture();
+    let res: PreviewCaptureResult;
+    try {
+      res = await ipc.previewCapture();
+    } catch (err) {
+      // Never reject: the buttons call this with `void`. The overlay shows previewError as a note.
+      const error = err instanceof Error ? err.message : String(err);
+      set({ previewError: error });
+      return { error };
+    }
+    if (!res.image_path) {
+      // Capture can fail without throwing (no compositor, no window) and the backend can leave
+      // `error` null: it is still a failure, never a silent success.
+      const error = res.error ?? translate(get().locale, 'preview.captureError');
+      set({ previewError: error });
+      return { error };
+    }
+    set({ previewError: null });
     get().addOneShotAttachment({
       type: 'staging_capture',
       image_path: res.image_path,
       user_note: res.log_tail.slice(-5).join('\n'),
     });
+    return 'ok';
   },
 
   setPreviewLightboxOpen: (open) => set({ previewLightboxOpen: open }),
@@ -819,10 +1213,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     try {
       const status = await ipc.piGetSetupStatus();
       const previous = get().piSetupStatus?.configured_providers ?? null;
-      set((s) => ({
-        piSetupStatus: status,
-        piSetupOpen: status.needs_setup ? s.piSetupOpen : false,
-      }));
+      set({ piSetupStatus: status });
       // A provider connected outside configure (e.g. OAuth in the terminal + Verify) changes pi's catalog.
       if (previous !== null && !sameMembers(previous, status.configured_providers)) {
         void get().loadModelCatalog();
@@ -833,14 +1224,130 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
 
-  setPiSetupOpen: (open) => set({ piSetupOpen: open }),
+  openProviderDialog: (provider) =>
+    set({
+      providerDialog: { open: true, preselect: provider ?? null, hiddenForSignIn: false },
+    }),
+
+  closeProviderDialog: () => {
+    // Closing the visible dialog always drops the sign-in slice: `waiting` stops its poll, and a
+    // finished phase (`timeout`/`invalid`/`error`) must not come back on the next open.
+    stopSignInPoll();
+    set({ providerSignIn: null, providerDialog: { ...CLOSED_PROVIDER_DIALOG } });
+  },
+
+  connectPiProvider: async (provider, apiKey) => {
+    const result = await ipc.piConnectProvider({ provider, api_key: apiKey });
+    set({ piSetupStatus: result.status });
+    let defaultChangedTo: DefaultChange | null = null;
+    // The backend keeps the key on `not_ready` and on `check_error`, so both are connected with a
+    // warning; only `invalid` is rolled back and skips the default rule.
+    const keyKept =
+      result.check === null ||
+      result.check_error !== null ||
+      result.check.status === 'ready' ||
+      result.check.status === 'not_ready';
+    if (keyKept) {
+      // pi lists only connected providers, so the catalog (and the initial default) depends on it.
+      await get().loadModelCatalog();
+      defaultChangedTo = await applyInitialDefaultIfNeeded(provider);
+    }
+    return { result, defaultChangedTo };
+  },
+
+  startProviderSignIn: (provider, options) => {
+    const slug = provider.trim();
+    // The slug is typed into a shell (`pi auth login <slug>`) and polled: never accept free text.
+    if (!isValidSlug(slug)) return;
+    get().launchPiInteractiveLogin(slug);
+    set((state) => ({
+      providerDialog: { ...state.providerDialog, hiddenForSignIn: true },
+    }));
+    if (options?.manualOnly === true) {
+      beginManualSignIn(slug, options.refetchCatalogOnReady === true);
+      return;
+    }
+    beginSignInPoll(slug, options?.refetchCatalogOnReady === true);
+  },
+
+  checkProviderSignInNow: () => {
+    if (signInPoller) {
+      signInPoller.checkNow();
+      return;
+    }
+    const signIn = get().providerSignIn;
+    if (signIn) void runSingleSignInCheck(signIn.provider);
+  },
+
+  cancelProviderSignIn: () => {
+    stopSignInPoll();
+    set({ providerSignIn: null });
+  },
+
+  revealProviderDialog: () =>
+    set((state) => ({
+      providerDialog: {
+        open: true,
+        preselect: state.providerSignIn?.provider ?? state.providerDialog.preselect,
+        hiddenForSignIn: false,
+      },
+    })),
+
+  hideProviderDialogForSignIn: () =>
+    set((state) => ({
+      providerDialog: { ...state.providerDialog, hiddenForSignIn: true },
+      bottomCollapsed: false,
+      zenMode: computeZenMode(state.leftCollapsed, state.rightCollapsed, false),
+    })),
+
+  disconnectPiProvider: async (provider) => {
+    const wasDefault = get().piSetupStatus?.active_provider === provider;
+    const status = await ipc.piLogoutProvider(provider);
+    set({ piSetupStatus: status });
+    const catalog = await get().loadModelCatalog();
+
+    let defaultChangedTo: DefaultChange | null = null;
+    if (wasDefault) {
+      const fallback = pickFallbackDefault(provider, buildProviderRows(status), catalog);
+      if (fallback) {
+        const next = await ipc.piConfigureProvider({
+          provider: fallback.provider,
+          model: fallback.model,
+          mark_completed: false,
+        });
+        set({ piSetupStatus: next });
+        defaultChangedTo = { provider: fallback.provider, model: fallback.model };
+      }
+    }
+
+    // A provider with an env hint can stay usable after logout; check only in that case (§4.5).
+    let stillViaEnv = false;
+    const row = buildProviderRows(status).find((candidate) => candidate.id === provider);
+    if (row?.envVar) {
+      try {
+        const check = await ipc.piCheckProvider(provider);
+        stillViaEnv = check.status === 'ready';
+      } catch {
+        stillViaEnv = false;
+      }
+    }
+
+    return { defaultChangedTo, stillViaEnv };
+  },
+
+  saveDefaultModel: async (selection, markCompleted) => {
+    const provider = selection?.provider ?? get().piSetupStatus?.active_provider ?? null;
+    if (!provider) return;
+    await get().configurePiProvider({
+      provider,
+      model: selection?.id ?? null,
+      mark_completed: markCompleted,
+    });
+  },
 
   configurePiProvider: async (req) => {
     const status = await ipc.piConfigureProvider(req);
-    set({
-      piSetupStatus: status,
-      piSetupOpen: status.needs_setup,
-    });
+    set({ piSetupStatus: status });
     void get().loadModelCatalog();
     return status;
   },
@@ -859,14 +1366,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set({ modelCatalogLoading: true, modelCatalogError: null });
     try {
       const catalog = await ipc.piListModels();
-      if (request !== modelCatalogRequest) return;
+      if (request !== modelCatalogRequest) return null;
       set({ modelCatalog: catalog, modelCatalogLoading: false });
+      return catalog;
     } catch (err) {
-      if (request !== modelCatalogRequest) return;
+      if (request !== modelCatalogRequest) return null;
       set({
         modelCatalogLoading: false,
         modelCatalogError: err instanceof Error ? err.message : String(err),
       });
+      return null;
     }
   },
 
@@ -877,14 +1386,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     });
     set({
       piSetupStatus: status,
-      piSetupOpen: false,
+      providerDialog: { ...CLOSED_PROVIDER_DIALOG },
     });
     return status;
   },
 
   launchPiInteractiveLogin: (provider) => {
     const clean = provider.trim();
-    if (!clean) return;
+    // This text is typed into the user's shell, so only a valid provider slug may pass.
+    if (!isValidSlug(clean)) return;
     set((state) => ({
       bottomCollapsed: false,
       zenMode: computeZenMode(state.leftCollapsed, state.rightCollapsed, false),
@@ -899,4 +1409,5 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
     return cmd;
   },
-}));
+  };
+});
